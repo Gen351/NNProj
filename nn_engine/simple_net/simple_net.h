@@ -1,7 +1,9 @@
 #pragma once
 
-#include "./simple_layer.h"
 #include<memory>
+
+#include "./simple_layer.h"
+#include "./simple_activation_layer.h"
 
 
 struct SimpleNet {
