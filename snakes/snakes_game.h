@@ -159,7 +159,13 @@ struct SnakesGame {
      */
     int run_net(bool display, SimpleNet& net) {
         int game_over_value = -1;
+        
         // display_game() (optional)
+        if(display) {
+            // Clearscr
+            std:: cout << "\033[H;2J";
+            display_game();
+        }
 
         while(game_over_value == -1) {
             // Input
@@ -181,6 +187,7 @@ struct SnakesGame {
             // ======================= //
 
 
+            // THIS PART AI HELPP
             // Simulate
                 // Head move to direction
 
@@ -190,7 +197,16 @@ struct SnakesGame {
                     // if collided with body
                         // game_over_value = 2;
                 // update
+
+
+
             // display_game() (optional)
+            if(display) {
+                // Clearscr
+                std:: cout << "\033[H;2J";
+                display_game();
+            }
+            
             game_ticks++;
         }
 
@@ -220,6 +236,8 @@ struct SnakesGame {
                             // apple.y
                             + 1
                             // board_size
+                            + 1
+                            // game_ticks
                             + 1;
 
         std::vector<float> state(state_size);
@@ -238,6 +256,7 @@ struct SnakesGame {
         state[i++] = float(apple.x);
         state[i++] = float(apple.y);
         state[i++] = float(board_size);
+        state[i++] = float(game_ticks);
         
         return state;
     }
