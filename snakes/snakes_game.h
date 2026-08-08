@@ -3,6 +3,9 @@
 #include<vector>
 #include<iostream>
 #include<random>
+#include<sstream>
+#include<thread>
+#include<chrono>
 
 #ifdef _WIN32
 #include<windows.h>
@@ -61,6 +64,10 @@ struct SnakesGame {
                 , head_y(_head_y)
                 , tail_x(_tail_x)
                 , tail_y(_tail_y) {}
+
+        void setDirection(int newDir) {
+            direction = (newDir <= 4 && newDir >= 0) ? newDir : 0;
+        }
     };
     struct Apple {
         int x, y;
@@ -70,6 +77,9 @@ struct SnakesGame {
         Apple(int _x, int _y)
                 : x(_x)
                 , y(_y) {}
+        void setPos(int _x, int _y) {
+            x = _x; y = _y;
+        }
     };
 
 
@@ -117,9 +127,10 @@ struct SnakesGame {
 
         std::uniform_int_distribution<size_t> dist(0, empty.size() - 1);
         size_t cell = empty[dist(engine)];
-        apple = Apple((int)(cell % board_size), (int)(cell / board_size));
+        apple.setPos((int)(cell % board_size), (int)(cell / board_size));
         return true;
     }
+
 
 
 
@@ -143,9 +154,9 @@ struct SnakesGame {
         // collided with wall(1): -50%
         // collided with body(2): -45%
         // board full(3): +100% (win)
-    int run(bool display=false) {
+    int run(bool display=false, int frame_delay_ms=0) {
         int game_over_value = -1;
-        if(display) {display_game();}
+        if(display) {display_game(true);}
 
         while(game_over_value == -1) {
             // Input
@@ -186,10 +197,10 @@ struct SnakesGame {
                     if(!spawnApple()) { game_over_value = 3; break; }
                 }
                 else if(snake.size == 1) {
-                    // single cell: vacate it, tail follows the old head
-                    board(old_tail_y, old_tail_x) = 0;
-                    snake.tail_x = old_head_x;
-                    snake.tail_y = old_head_y;
+                    // single cell: vacate it, tail stays with the head
+                    board(old_head_y, old_head_x) = 0;
+                    snake.tail_x = new_head_x;
+                    snake.tail_y = new_head_y;
                 }
                 else if(new_head_x == old_tail_x && new_head_y == old_tail_y) {
                     // tail chase: the old head becomes the new tail, nothing is cleared
@@ -218,7 +229,10 @@ struct SnakesGame {
             // ==== UNTIL THIS PART PLEASZ ======= //
 
             game_ticks++;
-            if(display) {display_game();}
+            if(display) {
+                display_game(false);    // overwrite the previous frame, no flicker
+                std::this_thread::sleep_for(std::chrono::milliseconds(frame_delay_ms));
+            }
         }
 
         return game_over_value;
@@ -237,7 +251,7 @@ struct SnakesGame {
      * - Output Layer~~~~~~~: Input [User_Def_N] 
      * ~~~~~~~~~~~~~~~~~~~~~| Output [4] (directions)
      */
-    int run_net(bool display, SimpleNet& net) {
+    int run_net(bool display, SimpleNet& net, int frame_delay_ms=0) {
         int game_over_value = -1;
         
         // display_game() (optional)
@@ -301,10 +315,10 @@ struct SnakesGame {
                     if(!spawnApple()) { game_over_value = 3; break; }
                 }
                 else if(snake.size == 1) {
-                    // single cell: vacate it, tail follows the old head
-                    board(old_tail_y, old_tail_x) = 0;
-                    snake.tail_x = old_head_x;
-                    snake.tail_y = old_head_y;
+                    // single cell: vacate it, tail stays with the head
+                    board(old_head_y, old_head_x) = 0;
+                    snake.tail_x = new_head_x;
+                    snake.tail_y = new_head_y;
                 }
                 else if(new_head_x == old_tail_x && new_head_y == old_tail_y) {
                     // tail chase: the old head becomes the new tail, nothing is cleared
@@ -336,7 +350,10 @@ struct SnakesGame {
             game_ticks++;
          
             // display_game() (optional)
-            if(display) {display_game();}   
+            if(display) {
+                display_game(false);    // overwrite the previous frame, no flicker
+                std::this_thread::sleep_for(std::chrono::milliseconds(frame_delay_ms));
+            }   
         }
 
         return game_over_value;
@@ -346,28 +363,7 @@ struct SnakesGame {
     // make this float because my net only accepts float
     // reconsider later
     std::vector<float> getState() {
-        size_t state_size = // board
-                            board.data.size()
-                            // snake.direction
-                            + 1 
-                            // snake.size
-                            + 1
-                            // snake.head_x
-                            + 1
-                            // snake.head_y
-                            + 1
-                            // snake.tail_x
-                            + 1
-                            // snake.tail_y
-                            + 1
-                            // apple.x
-                            + 1
-                            // apple.y
-                            + 1
-                            // board_size
-                            + 1
-                            // game_ticks /  (board_size * board_size)
-                            + 1;
+        size_t state_size = getStateSize();
 
         std::vector<float> state(state_size);
 
@@ -385,7 +381,7 @@ struct SnakesGame {
         state[i++] = float(apple.x);
         state[i++] = float(apple.y);
         state[i++] = float(board_size);
-        // Normalize, the game_ticks could reach INT
+        // Normalize, the game_ticks could reach INT64_MAX
         state[i++] = float(float(game_ticks) / float(board_size * board_size));
         
         return state;
@@ -395,8 +391,10 @@ struct SnakesGame {
     void display_game(bool clear_scr=true) {
         enableVt();
 
-        // Clear screen and move cursor home
-        if(clear_scr) {std::cout << "\x1b[2J\x1b[H";}
+        // Buffer the whole frame, then write it in one shot
+        std::ostringstream frame;
+        if(clear_scr) {frame << "\x1b[H\x1b[2J";}   // first frame: clear screen
+        else {frame << "\x1b[H";}                   // later frames: overwrite in place
 
         // Cells the snake is heading toward (beside the head, and one more ahead)
         int dir_indication_x = snake.head_x;
@@ -463,10 +461,39 @@ struct SnakesGame {
                     }
                 }
 
-                std::cout << "\x1b[48;2;" << r << ";" << g << ";" << b << "m  \x1b[0m";
+                frame << "\x1b[48;2;" << r << ";" << g << ";" << b << "m  \x1b[0m";
             }
-            std::cout << "\n";
+            frame << "\n";
         }
-        std::cout << std::flush;
+        std::cout << frame.str() << std::flush;
+    }
+
+
+
+    size_t getStateSize() {
+        size_t state_size = // board
+                            board.data.size()
+                            // snake.direction
+                            + 1 
+                            // snake.size
+                            + 1
+                            // snake.head_x
+                            + 1
+                            // snake.head_y
+                            + 1
+                            // snake.tail_x
+                            + 1
+                            // snake.tail_y
+                            + 1
+                            // apple.x
+                            + 1
+                            // apple.y
+                            + 1
+                            // board_size
+                            + 1
+                            // game_ticks / (board_size * board_size)
+                            + 1;
+
+        return state_size;
     }
 };
