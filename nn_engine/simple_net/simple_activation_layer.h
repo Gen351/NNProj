@@ -1,11 +1,12 @@
 #pragma once
 
-#include "abstract_simple_layer.h"
+#include "./abstract_simple_layer.h"
 
 #include<cmath>
 #include<vector>
 
 class SimpleActivationLayer : public AbstractSimpleLayer {
+public:
     enum ActivationType {
         SIGM,
         RELU,
@@ -13,11 +14,14 @@ class SimpleActivationLayer : public AbstractSimpleLayer {
         TANH
     };
 
-    ActivationType activationType;
-
-public:
     SimpleActivationLayer() : activationType(ActivationType::SIGM) {}
     SimpleActivationLayer(ActivationType act) : activationType(act) {}
+
+    ActivationType getActivation() const { return activationType; }
+    void setActivation(ActivationType act) { activationType = act; }
+
+private:
+    ActivationType activationType;
 
     std::vector<float> forward(const std::vector<float>& previousInput) override {
         std::vector<float> output(previousInput.size(), 0.0f);
@@ -44,18 +48,17 @@ public:
     }
 
     
-	void save(std::ofstream& file) {
+	void save(std::ofstream& file) const override {
 
 	}
 
-    void load(std::ofstream& file) {
+    void load(std::ifstream& file) override {
 
 	}
     
-	std::string getType() {
-		return "ACT";
-	}
 
+
+	std::string getType() const override {return "ACT";}
 
 private:
     float Sigmoid(float x) {

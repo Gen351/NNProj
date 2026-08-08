@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../matrix_op/matrix.hpp"
-#include "abstract_simple_layer.h"
+#include "./abstract_simple_layer.h"
 
 #include<vector>
 #include<cmath>
@@ -9,18 +9,18 @@
 #include<stdexcept>
 
 class SimpleLayer : public AbstractSimpleLayer {
-	size_t input;
-	size_t output;
+	size_t input_size;
+	size_t output_size;
 
 public:
-	// @brief Rows=output, Cols=input
+	// @brief Rows=output_size, Cols=input_size
 	Matrix<float> weights;
 	std::vector<float> biases;
 
 	SimpleLayer() : weights(1, 1)
 					, biases(1, 0.0f)
-					, input(1)
-					, output(1)	
+					, input_size(1)
+					, output_size(1)	
 	{
 		// Init random weights
 		for(float& w : weights.data) w = initWeightHeNormal(1);
@@ -28,8 +28,8 @@ public:
 
 	SimpleLayer(size_t in, size_t out) : weights(out, in)
 										, biases(out, 0.0f)
-										, input(in)
-										, output(out) 
+										, input_size(in)
+										, output_size(out) 
 	{
 		// Init random weights
 		for(float& w : weights.data) w = initWeightHeNormal(in);
@@ -37,11 +37,11 @@ public:
 
 	std::vector<float> forward(const std::vector<float>& previousInput) override {
 		#if NDEBUG
-			if(previousInput.size() != input)
-				throw std::runtime_error("Forward: Input Misallignment [previousInput.size() != input]");
+			if(previousInput.size() != input_size)
+				throw std::runtime_error("Forward: Input Misallignment [previousInput.size() != input_size]");
 		#endif
 
-		std::vector<float> output;
+		std::vector<float> output(output_size);
 		
 		for(size_t i = 0; i < weights.rows(); i++){
 			float sum = biases[i];
@@ -53,18 +53,41 @@ public:
 		return output;
 	}
 
-	void save(std::ofstream& file) {
+	void save(std::ofstream& file) const override {
+        // 1. input_size, output_size
+        file << input_size << " " << output_size << " " << "\n";
 
+        // 2. Save Weights
+		// When loading this: 
+		/**
+			Matrix<float> newWeights(output_size, input_size, std::vector<float>(output_size * input_size));
+			for(float& w :  newWeights) { file >> w }
+		*/
+		for(const float& w : weights.data) { file << w << " "; }
+
+        // 3. Save Biases
+        for(const float& b : biases) { file << b << " "; }
+        file << "\n";
 	}
 
-    void load(std::ofstream& file) {
+    void load(std::ifstream& file) override {
+		// 1. Read Config
+		file >> input_size;
+		file >> output_size;
+		
+		// 2. Load Weights
+		Matrix<float> newWeights(output_size, input_size, std::vector<float>(output_size * input_size));
+		for(float& nW : newWeights.data) { file >> nW; }
+		weights = newWeights;
 
+        // 2. Load Biases
+        for(float& b : biases) { file >> b; }
 	}
     
-	std::string getType() {
-		return "LAY";
-	}
 
+
+
+	std::string getType() const override {return "LAY";}
 
 private:
 	// Not by me

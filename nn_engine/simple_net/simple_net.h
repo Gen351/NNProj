@@ -1,6 +1,6 @@
 #pragma once
 
-#include "simple_layer.h"
+#include "./simple_layer.h"
 
 struct SimpleNet {
     std::vector<size_t> layerSizes;

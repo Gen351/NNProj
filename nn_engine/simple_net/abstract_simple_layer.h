@@ -10,15 +10,16 @@ enum class LayerType {
 };
 
 class AbstractSimpleLayer {
-
 protected:
     bool training = false;
 
 public:
+    virtual ~AbstractSimpleLayer() = default;
+
     virtual std::vector<float> forward(const std::vector<float>& previousInput) = 0;
 
     virtual void save(std::ofstream& file) const = 0;
-    virtual void load(std::ofstream& file) const = 0;
+    virtual void load(std::ifstream& file) = 0;
     virtual std::string getType() const = 0;
 
     void train() {

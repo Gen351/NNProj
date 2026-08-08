@@ -24,9 +24,10 @@ struct Matrix {
     Matrix(size_t r, size_t c, T init = T{}) 
         : row(r), col(c), data(r * c, init)
     {}
+
     // init with (r, c) row_size, col_size
-    Matrix(size_t r, std::vector<T> init)
-        : row(r), col(init.size()), data(init)
+    Matrix(size_t r, size_t c, std::vector<T> init)
+        : row(r), col(c), data(init)
     {}
 
 
