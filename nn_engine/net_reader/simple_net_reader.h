@@ -79,21 +79,6 @@ namespace {
         layer->setActivation(stringToActivation(tag));
         return layer;
     }
-
-    // layerSizes holds the boundary sizes: [in0, out0, out1, ...]
-    inline void rebuildLayerSizes(SimpleNet& net) {
-        net.layerSizes.clear();
-        bool haveFirst = false;
-        for(const auto& layer : net.layers) {
-            if(layer->getType() != "LAY") continue;
-            const SimpleLayer& dense = static_cast<const SimpleLayer&>(*layer);
-            if(!haveFirst) {
-                net.layerSizes.push_back(dense.weights.cols());
-                haveFirst = true;
-            }
-            net.layerSizes.push_back(dense.weights.rows());
-        }
-    }
 }
 
     /// @brief Writes net to "<name>.simple_net" (extension appended if missing).
@@ -169,7 +154,6 @@ namespace {
                                           + "' at layer " + std::to_string(i));
         }
 
-        rebuildLayerSizes(net);
         return net;
     }
 

@@ -5,6 +5,7 @@
 #include<cmath>
 #include<vector>
 
+
 class SimpleActivationLayer : public AbstractSimpleLayer {
 public:
     enum ActivationType {
@@ -46,17 +47,6 @@ private:
 
         return output;
     }
-
-    
-	void save(std::ofstream& file) const override {
-
-	}
-
-    void load(std::ifstream& file) override {
-
-	}
-    
-
 
 	std::string getType() const override {return "ACT";}
 

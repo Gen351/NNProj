@@ -36,7 +36,7 @@ public:
 	}
 
 	std::vector<float> forward(const std::vector<float>& previousInput) override {
-		#if NDEBUG
+		#ifndef NDEBUG
 			if(previousInput.size() != input_size)
 				throw std::runtime_error("Forward: Input Misallignment [previousInput.size() != input_size]");
 		#endif
@@ -52,40 +52,6 @@ public:
 		}
 		return output;
 	}
-
-	void save(std::ofstream& file) const override {
-        // 1. input_size, output_size
-        file << input_size << " " << output_size << " " << "\n";
-
-        // 2. Save Weights
-		// When loading this: 
-		/**
-			Matrix<float> newWeights(output_size, input_size, std::vector<float>(output_size * input_size));
-			for(float& w :  newWeights) { file >> w }
-		*/
-		for(const float& w : weights.data) { file << w << " "; }
-
-        // 3. Save Biases
-        for(const float& b : biases) { file << b << " "; }
-        file << "\n";
-	}
-
-    void load(std::ifstream& file) override {
-		// 1. Read Config
-		file >> input_size;
-		file >> output_size;
-		
-		// 2. Load Weights
-		Matrix<float> newWeights(output_size, input_size, std::vector<float>(output_size * input_size));
-		for(float& nW : newWeights.data) { file >> nW; }
-		weights = newWeights;
-
-        // 2. Load Biases
-        for(float& b : biases) { file >> b; }
-	}
-    
-
-
 
 	std::string getType() const override {return "LAY";}
 
