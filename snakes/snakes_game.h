@@ -2,6 +2,7 @@
 
 #include<vector>
 #include<iostream>
+#include<random>
 
 #ifdef _WIN32
 #include<windows.h>
@@ -103,6 +104,23 @@ struct SnakesGame {
         snake = Snake(mid, mid, mid, mid);
     }
 
+    // Places the apple on a random empty cell. Never inside the body.
+    // Returns false when the board is full (win).
+    bool spawnApple() {
+        static thread_local std::mt19937 engine(std::random_device{}());
+
+        std::vector<size_t> empty;
+        for(size_t i = 0; i < board.data.size(); i++) {
+            if(board.data[i] == 0) empty.push_back(i);
+        }
+        if(empty.empty()) { apple = Apple(); return false; }
+
+        std::uniform_int_distribution<size_t> dist(0, empty.size() - 1);
+        size_t cell = empty[dist(engine)];
+        apple = Apple((int)(cell % board_size), (int)(cell / board_size));
+        return true;
+    }
+
 
 
 
@@ -124,28 +142,90 @@ struct SnakesGame {
     // Retun the cause of death:
         // collided with wall(1): -50%
         // collided with body(2): -45%
+        // board full(3): +100% (win)
     int run(bool display=false) {
         int game_over_value = -1;
-        // display_game() (optional)
+        if(display) {display_game();}
 
         while(game_over_value == -1) {
             // Input
-                // only start the game beyond this point
-            // Simulate
-                // Checks
-                    // if collided with wall
-                        // game_over_value = 1;
-                    // if collided with body
-                        // game_over_value = 2;
-                // update
 
-            // display_game() (optional)
-            // Input (input here because the first input was outside this loop)
+            // == THIS PART AI HELPP ============= //
+            
+            // Simulate
+            if(snake.direction != 0) {
+                // Head move to direction
+                int new_head_x = snake.head_x + (snake.direction == 1 ? -1 : snake.direction == 3 ? 1 : 0);
+                int new_head_y = snake.head_y + (snake.direction == 2 ? -1 : snake.direction == 4 ? 1 : 0);
+
+                // Checks
+                if(new_head_x < 0 || new_head_x >= (int)board_size
+                || new_head_y < 0 || new_head_y >= (int)board_size) {
+                    // collided with wall
+                    game_over_value = 1;
+                    break;
+                }
+                if(board(new_head_y, new_head_x) == 1
+                && !(new_head_x == snake.tail_x && new_head_y == snake.tail_y)) {
+                    // collided with body
+                    game_over_value = 2;
+                    break;
+                }
+
+                // update
+                bool eating = (apple.x != -1 && new_head_x == apple.x && new_head_y == apple.y);
+                int old_head_x = snake.head_x, old_head_y = snake.head_y;
+                int old_tail_x = snake.tail_x, old_tail_y = snake.tail_y;
+
+                board(new_head_y, new_head_x) = 1;
+                snake.head_x = new_head_x;
+                snake.head_y = new_head_y;
+
+                if(eating) {
+                    snake.size++;
+                    if(!spawnApple()) { game_over_value = 3; break; }
+                }
+                else if(snake.size == 1) {
+                    // single cell: vacate it, tail follows the old head
+                    board(old_tail_y, old_tail_x) = 0;
+                    snake.tail_x = old_head_x;
+                    snake.tail_y = old_head_y;
+                }
+                else if(new_head_x == old_tail_x && new_head_y == old_tail_y) {
+                    // tail chase: the old head becomes the new tail, nothing is cleared
+                    snake.tail_x = old_head_x;
+                    snake.tail_y = old_head_y;
+                }
+                else {
+                    board(old_tail_y, old_tail_x) = 0;
+                    // new tail = the occupied neighbor of the old tail (excluding the new head)
+                    const int dx[4] = {1, -1, 0, 0};
+                    const int dy[4] = {0, 0, 1, -1};
+                    for(int i = 0; i < 4; i++) {
+                        int nx = old_tail_x + dx[i];
+                        int ny = old_tail_y + dy[i];
+                        if(nx < 0 || nx >= (int)board_size || ny < 0 || ny >= (int)board_size) continue;
+                        if(nx == new_head_x && ny == new_head_y) continue;
+                        if(board(ny, nx) == 1) {
+                            snake.tail_x = nx;
+                            snake.tail_y = ny;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // ==== UNTIL THIS PART PLEASZ ======= //
+
             game_ticks++;
+            if(display) {display_game();}
         }
 
         return game_over_value;
     }
+
+
+
 
     /** Network architecture should be:
      * - Input Layer~~~~~~~~: Input [game.getState().size()] 
@@ -161,11 +241,9 @@ struct SnakesGame {
         int game_over_value = -1;
         
         // display_game() (optional)
-        if(display) {
-            // Clearscr
-            std:: cout << "\033[H;2J";
-            display_game();
-        }
+        if(display) {display_game();}
+        
+        // Pause maybe... to see?
 
         while(game_over_value == -1) {
             // Input
@@ -187,27 +265,78 @@ struct SnakesGame {
             // ======================= //
 
 
-            // THIS PART AI HELPP
+            // == THIS PART AI HELPP ============= //
+            
             // Simulate
+            if(snake.direction != 0) {
                 // Head move to direction
+                int new_head_x = snake.head_x + (snake.direction == 1 ? -1 : snake.direction == 3 ? 1 : 0);
+                int new_head_y = snake.head_y + (snake.direction == 2 ? -1 : snake.direction == 4 ? 1 : 0);
 
                 // Checks
-                    // if collided with wall
-                        // game_over_value = 1;
-                    // if collided with body
-                        // game_over_value = 2;
+                if(new_head_x < 0 || new_head_x >= (int)board_size
+                || new_head_y < 0 || new_head_y >= (int)board_size) {
+                    // collided with wall
+                    game_over_value = 1;
+                    break;
+                }
+                if(board(new_head_y, new_head_x) == 1
+                && !(new_head_x == snake.tail_x && new_head_y == snake.tail_y)) {
+                    // collided with body
+                    game_over_value = 2;
+                    break;
+                }
+
                 // update
+                bool eating = (apple.x != -1 && new_head_x == apple.x && new_head_y == apple.y);
+                int old_head_x = snake.head_x, old_head_y = snake.head_y;
+                int old_tail_x = snake.tail_x, old_tail_y = snake.tail_y;
 
+                board(new_head_y, new_head_x) = 1;
+                snake.head_x = new_head_x;
+                snake.head_y = new_head_y;
 
-
-            // display_game() (optional)
-            if(display) {
-                // Clearscr
-                std:: cout << "\033[H;2J";
-                display_game();
+                if(eating) {
+                    snake.size++;
+                    if(!spawnApple()) { game_over_value = 3; break; }
+                }
+                else if(snake.size == 1) {
+                    // single cell: vacate it, tail follows the old head
+                    board(old_tail_y, old_tail_x) = 0;
+                    snake.tail_x = old_head_x;
+                    snake.tail_y = old_head_y;
+                }
+                else if(new_head_x == old_tail_x && new_head_y == old_tail_y) {
+                    // tail chase: the old head becomes the new tail, nothing is cleared
+                    snake.tail_x = old_head_x;
+                    snake.tail_y = old_head_y;
+                }
+                else {
+                    board(old_tail_y, old_tail_x) = 0;
+                    // new tail = the occupied neighbor of the old tail (excluding the new head)
+                    const int dx[4] = {1, -1, 0, 0};
+                    const int dy[4] = {0, 0, 1, -1};
+                    for(int i = 0; i < 4; i++) {
+                        int nx = old_tail_x + dx[i];
+                        int ny = old_tail_y + dy[i];
+                        if(nx < 0 || nx >= (int)board_size || ny < 0 || ny >= (int)board_size) continue;
+                        if(nx == new_head_x && ny == new_head_y) continue;
+                        if(board(ny, nx) == 1) {
+                            snake.tail_x = nx;
+                            snake.tail_y = ny;
+                            break;
+                        }
+                    }
+                }
             }
-            
+
+            // ==== UNTIL THIS PART PLEASZ ======= //
+
+
             game_ticks++;
+         
+            // display_game() (optional)
+            if(display) {display_game();}   
         }
 
         return game_over_value;
@@ -237,7 +366,7 @@ struct SnakesGame {
                             + 1
                             // board_size
                             + 1
-                            // game_ticks
+                            // game_ticks /  (board_size * board_size)
                             + 1;
 
         std::vector<float> state(state_size);
@@ -256,17 +385,18 @@ struct SnakesGame {
         state[i++] = float(apple.x);
         state[i++] = float(apple.y);
         state[i++] = float(board_size);
-        state[i++] = float(game_ticks);
+        // Normalize, the game_ticks could reach INT
+        state[i++] = float(float(game_ticks) / float(board_size * board_size));
         
         return state;
     }
 
     // Screenshot only: renders the current game state once.
-    void display_game() {
+    void display_game(bool clear_scr=true) {
         enableVt();
 
         // Clear screen and move cursor home
-        std::cout << "\x1b[2J\x1b[H";
+        if(clear_scr) {std::cout << "\x1b[2J\x1b[H";}
 
         // Cells the snake is heading toward (beside the head, and one more ahead)
         int dir_indication_x = snake.head_x;
