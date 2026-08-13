@@ -21,6 +21,10 @@ public:
     ActivationType getActivation() const { return activationType; }
     void setActivation(ActivationType act) { activationType = act; }
 
+    std::unique_ptr<AbstractSimpleLayer> clone() const override {
+        return std::make_unique<SimpleActivationLayer>(*this);
+    }
+
 private:
     ActivationType activationType;
 

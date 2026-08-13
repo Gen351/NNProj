@@ -60,12 +60,12 @@ namespace {
         auto layer = std::make_unique<SimpleLayer>(in, out);
         for(float& w : layer->weights.data)
             if(!(file >> w))
-                throw std::runtime_error("SimpleNetReader::load: missing weight at layer "
-                                         + std::to_string(index));
+                throw std::runtime_error("SimpleNetReader::load: file ended prematurely (truncated?) "
+                                         "while reading layer " + std::to_string(index));
         for(float& b : layer->biases)
             if(!(file >> b))
-                throw std::runtime_error("SimpleNetReader::load: missing bias at layer "
-                                         + std::to_string(index));
+                throw std::runtime_error("SimpleNetReader::load: file ended prematurely (truncated?) "
+                                         "while reading layer " + std::to_string(index));
         return layer;
     }
 

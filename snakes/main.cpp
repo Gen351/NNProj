@@ -17,11 +17,8 @@
 
 #include "../nn_engine/simple_net/simple_net.h"
 #include "../nn_engine/net_reader/simple_net_reader.h"
-#include "./snakes_game.h"
-
-
-float calculateFitness(const std::vector<float>& game_state, const size_t board_size, int game_over_value);
-float simpleFitness(const std::vector<float>& game_state, const size_t board_size, int game_over_value);
+#include "./snake_environment.h"
+#include "./snake_trainer.h"
 
 void mutate(SimpleNet& net
         , const float mutation_chance
@@ -96,9 +93,9 @@ public:
 
 int main(int argc, char* argv[]) {
     std::string continue_training = "";
-    int max_gen = 10'000'000;
-    int batch_save = 10'000;
-    float mutation_chance = 0.09f;
+    int max_gen = 100'000;
+    int batch_save = 100;
+    float mutation_chance = 0.18f;
     float sigma = 0.05f;
     int pop_size = 50;
     int evals_per_net = 5;
@@ -140,8 +137,8 @@ int main(int argc, char* argv[]) {
     const int board_size = 20;
     
     // Population ES settings
-    const int num_elites = pop_size / 6;        // Top networks preserved unchanged
-    const int tournament_k = 2;                 // Tournament selection size
+    const int num_elites = pop_size / 5;        // Top networks preserved unchanged
+    const int tournament_k = 5;                 // Tournament selection size
     
     float best_fitness = -99999.0f;
     SimpleNet bestNet;
@@ -170,13 +167,16 @@ int main(int argc, char* argv[]) {
     auto make_net = [&](void) -> SimpleNet {
         SimpleNet n;
 
-        n.addLayer(std::make_unique<SimpleLayer>(input, 32));
+        n.addLayer(std::make_unique<SimpleLayer>(input, 36));
+        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
+        
+        n.addLayer(std::make_unique<SimpleLayer>(36, 50));
+        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
+        
+        n.addLayer(std::make_unique<SimpleLayer>(50, 18));
         n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
 
-        n.addLayer(std::make_unique<SimpleLayer>(32, 16));
-        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
-
-        n.addLayer(std::make_unique<SimpleLayer>(16, output));
+        n.addLayer(std::make_unique<SimpleLayer>(18, output));
         n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
 
         return n;
@@ -216,6 +216,7 @@ int main(int argc, char* argv[]) {
         SimpleNet net;
         float fitness = -99999.0f;
         int score = 0;
+        SnakesGame best_game;   // final state of this net's best single run
     };
     
     // Initialize population
@@ -243,14 +244,18 @@ int main(int argc, char* argv[]) {
     auto eval_individual = [&](Individual& ind) -> float {
         float total_fitness = 0.0f;
         int max_score = 0;
+        float best_single = -1e30f;
+        SnakesGame best_game(board_size);
         for (int e = 0; e < evals_per_net; ++e) {
             SnakesGame local_game(board_size);
-            float f = local_game.run_net(false, ind.net, 0);
+            const float f = SnakeTrainer::run_net(local_game, ind.net, false, 0).fitness;
             total_fitness += f;
+            if (f > best_single) { best_single = f; best_game = local_game; }
             max_score = std::max(max_score, (int)local_game.snake.size);
         }
         ind.fitness = total_fitness / evals_per_net;
         ind.score = max_score;
+        ind.best_game = std::move(best_game);
         return ind.fitness;
     };
     
@@ -259,18 +264,8 @@ int main(int argc, char* argv[]) {
         futures.reserve(pop.size());
         
         for (auto& ind : pop) {
-            futures.push_back(pool.enqueue([&ind, board_size, evals_per_net]() -> float {
-                float total_fitness = 0.0f;
-                int max_score = 0;
-                for (int e = 0; e < evals_per_net; ++e) {
-                    SnakesGame local_game(board_size);
-                    float f = local_game.run_net(false, ind.net, 0);
-                    total_fitness += f;
-                    max_score = std::max(max_score, (int)local_game.snake.size);
-                }
-                ind.fitness = total_fitness / evals_per_net;
-                ind.score = max_score;
-                return ind.fitness;
+            futures.push_back(pool.enqueue([&ind, &eval_individual]() -> float {
+                return eval_individual(ind);
             }));
         }
         
@@ -290,7 +285,7 @@ int main(int argc, char* argv[]) {
     
     bestNet = population[0].net;
     best_fitness = population[0].fitness;
-    best_snapshot = makeSnapshot(game, best_fitness, 0);
+    best_snapshot = makeSnapshot(population[0].best_game, best_fitness, 0);
     
     int gen_count = 0;
     
@@ -303,7 +298,7 @@ int main(int argc, char* argv[]) {
         if (population[0].fitness > best_fitness) {
             bestNet = population[0].net;
             best_fitness = population[0].fitness;
-            best_snapshot = makeSnapshot(game, best_fitness, gen_count);
+            best_snapshot = makeSnapshot(population[0].best_game, best_fitness, gen_count);
         }
         
         // Display
@@ -324,7 +319,7 @@ int main(int argc, char* argv[]) {
                 , bestNet
                 , population[0].net
                 , best_snapshot
-                , makeSnapshot(game, population[0].fitness, gen_count)
+                , makeSnapshot(population[0].best_game, population[0].fitness, gen_count)
                 , board_size);
             std::cout << "Saved: " << run_dir << "\n";
         }

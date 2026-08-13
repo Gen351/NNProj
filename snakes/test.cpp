@@ -5,7 +5,8 @@
 #include "../nn_engine/simple_net/simple_net.h"
 #include "../nn_engine/simple_net/simple_layer.h"
 #include "../nn_engine/net_reader/simple_net_reader.h"
-#include "./snakes_game.h"
+#include "./snake_environment.h"
+#include "./snake_trainer.h"
 
 
 int main(int argc, char* argv[]) {
@@ -47,9 +48,11 @@ int main(int argc, char* argv[]) {
               << " | model: " << model_path
               << " | speed_ms: " << speed_ms << "\n";
 
-    const float fitness = game.run_net(true, net, speed_ms);
+    const SnakeTrainer::RunResult res = SnakeTrainer::run_net(game, net, true, speed_ms);
 
-    std::cout << "\ngame over: " << fitness << " (1=wall 2=body 3=win 4=tick cap)\n"
-              << "score: " << game.snake.size << "\n";
+    std::cout << "\nfitness: " << res.fitness << "\n"
+              << "death cause: " << res.death_cause
+              << " (1=wall 2=body 3=win 4=tick cap 5=starved)\n"
+              << "score: " << res.score << "\n";
     return 0;
 }

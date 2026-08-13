@@ -38,7 +38,7 @@ public:
 	std::vector<float> forward(const std::vector<float>& previousInput) override {
 		#ifndef NDEBUG
 			if(previousInput.size() != input_size)
-				throw std::runtime_error("Forward: Input Misallignment [previousInput.size() != input_size]");
+				throw std::runtime_error("Forward: Input Misallignment [previousInput.size() != input_size]" + std::to_string(previousInput.size()) + " : " + std::to_string(input_size));
 		#endif
 
 		std::vector<float> output(output_size);
@@ -51,6 +51,10 @@ public:
 			output[i] = sum;
 		}
 		return output;
+	}
+
+	std::unique_ptr<AbstractSimpleLayer> clone() const override {
+		return std::make_unique<SimpleLayer>(*this);
 	}
 
 	std::string getType() const override {return "LAY";}
