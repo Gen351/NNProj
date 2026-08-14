@@ -100,6 +100,8 @@ int main(int argc, char* argv[]) {
     int pop_size = 1000;
     int evals_per_net = 5;
 
+    int suggested_board_size = 35;
+
 
     // Read User Args ============== //
     for (int i = 1; i < argc; ++i) {
@@ -121,6 +123,7 @@ int main(int argc, char* argv[]) {
         else if (key == "SIGMA") sigma = std::stof(val);
         else if (key == "POP_SIZE") pop_size = std::stoi(val);
         else if (key == "EVALS_PER_NET") evals_per_net = std::stoi(val);
+        else if (key == "BOARD_SIZE") suggested_board_size = std::stoi(val);
     }
     // ============================= //
 
@@ -135,7 +138,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Train Variables ============= //
-    const int board_size = 35;
+    const int board_size = suggested_board_size;
     
     // Population ES settings
     const int num_elites = pop_size * 0.01;      // Top networks preserved unchanged

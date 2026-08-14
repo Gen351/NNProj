@@ -44,6 +44,7 @@ inline RunResult run_net(SnakesGame& game, SimpleNet& net, bool display = false,
 
     const size_t max_ticks_without_eat = game.board_size * game.board_size * 2;
     size_t ticks_since_eat = 0;
+	float tick_per_eat = 0.0;
 
     if(display) game.display_game();
 
@@ -57,26 +58,29 @@ inline RunResult run_net(SnakesGame& game, SimpleNet& net, bool display = false,
         ticks_since_eat++;
 
         // Ate an apple? Later apples are worth more (harder to reach)
+        const float eat_reward = ((float)game.board_size * (float)game.board_size * 1.2);
         if(r.ate) {
-            result.fitness += 1200.0f;
-            result.fitness -= ((float)max_ticks_without_eat / 1150.0f) * (ticks_since_eat);
-            ticks_since_eat = 0;
+            result.fitness += eat_reward;
+            result.fitness -= ((float)max_ticks_without_eat / (eat_reward * 0.99)) * (ticks_since_eat);
+            tick_per_eat += ticks_since_eat;
+			ticks_since_eat = 0;
         }
 
         if(game.snake.size == 1) {
-            result.fitness -= ((float)max_ticks_without_eat / 1200.0f) * (ticks_since_eat);
+            result.fitness -= ((float)max_ticks_without_eat / (eat_reward * 0.98)) * (ticks_since_eat);
         }
 
         if(display) {
             game.display_game(false);
+			std::cout << "\nTick: " << ticks_since_eat << " / " << max_ticks_without_eat << "\nAve Tick/Eat: " << (tick_per_eat == 0 ? "--" : std::to_string((tick_per_eat / game.snake.size - 1))) << "\nIdeal Tick/Eat: " << game.board_size + (game.board_size / 2) << std::flush;
             std::this_thread::sleep_for(std::chrono::milliseconds(frame_delay_ms));
-        }
+		}
 
         // Starvation: not eating for too long means it's going in circles;
         // end the run now so circling can never farm a tick-cap reward.
         if(ticks_since_eat > max_ticks_without_eat) {
             game.terminate(5);
-            result.fitness -= ((float)max_ticks_without_eat * 1.5f);
+            result.fitness -= ((float)max_ticks_without_eat * 2.0f);
             break;
         }
     }
@@ -84,7 +88,7 @@ inline RunResult run_net(SnakesGame& game, SimpleNet& net, bool display = false,
     // Hit the tick cap: survived the run.
     if(!game.isGameOver() && game.game_ticks >= game.max_game_tick) {
         game.terminate(4);
-        result.fitness -= ((float)max_ticks_without_eat * 0.4f) * (1.0f - (float)game.game_ticks / (float)game.max_game_tick);
+        result.fitness -= ((float)max_ticks_without_eat * 2.0f) * (1.0f - (float)game.game_ticks / (float)game.max_game_tick);
     }
 
     // Death-time scaled penalties: dying early is punished much harder than
@@ -92,18 +96,18 @@ inline RunResult run_net(SnakesGame& game, SimpleNet& net, bool display = false,
     const int cause = game.deathCause();
     const float max_tick = (float)game.max_game_tick;
     if(cause == 1 || cause == 5) {
-        result.fitness -= ((float)max_ticks_without_eat * 0.85f) * (1.0f - (float)game.game_ticks / max_tick);
+        result.fitness -= ((float)max_ticks_without_eat * 0.8f) * (1.0f - (float)game.game_ticks / max_tick);
     } else if(cause == 2) {
-        result.fitness -= ((float)max_ticks_without_eat * 0.25f) * (1.0f - (float)game.game_ticks / max_tick);
+        result.fitness -= ((float)max_ticks_without_eat * 0.2f) * (1.0f - (float)game.game_ticks / max_tick);
     } else if(cause == 3) {
-        result.fitness += 500000.0f; // won: board full
+        result.fitness += 50'000'000.0f; // won: board full
     }
 
     result.death_cause = cause;
     result.game_ticks = game.game_ticks;
     result.score = (int)game.snake.size;
 
-    result.fitness += (0.9f * (float)game.game_ticks / max_tick);
+    result.fitness += (0.93f * (float)game.game_ticks / max_tick);
 
     return result;
 }

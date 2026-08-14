@@ -107,7 +107,7 @@ struct SnakesGame {
     void reset() {
         game_ticks = 0;
         game_over = 0;
-        max_game_tick = board_size * board_size * 30;
+        max_game_tick = board_size * board_size * board_size;
         snake = Snake(board_size);
         const int mid = (int)(board_size / 2);
         snake.body = { Pos{snake.head_x, snake.head_y} };
@@ -445,7 +445,7 @@ struct SnakesGame {
             }
             frame << "\n";
         }
-        std::cout << frame.str() << std::flush;
+        std::cout << frame.str() << "\n\n> Score: " << snake.size - 1 << std::flush;
     }
 
 private:
