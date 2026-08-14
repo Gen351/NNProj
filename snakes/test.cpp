@@ -10,6 +10,8 @@
 
 
 int main(int argc, char* argv[]) {
+    srand(std::time(nullptr));
+
     if(argc < 2) {
         std::cout << "Usage: test <model.simple_net> [speed_ms]\n"
                   << "  model.simple_net : path to a trained net (e.g. ./trained_networks/run_19/best.simple_net)\n"
@@ -40,7 +42,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    const int board_size = 20;
+    const int board_size = 35;
 
     SnakesGame game(board_size);
 
@@ -49,7 +51,7 @@ int main(int argc, char* argv[]) {
               << " | speed_ms: " << speed_ms << "\n";
 
     const SnakeTrainer::RunResult res = SnakeTrainer::run_net(game, net, true, speed_ms);
-
+    
     std::cout << "\nfitness: " << res.fitness << "\n"
               << "death cause: " << res.death_cause
               << " (1=wall 2=body 3=win 4=tick cap 5=starved)\n"

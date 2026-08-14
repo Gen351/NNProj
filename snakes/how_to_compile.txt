@@ -1,17 +1,16 @@
 - How to compile and run training
 
--- Compile: 
-    (from the project root NNProj/):
-        C:/RBuildTools/4.3/ucrt64/bin/g++.exe -std=c++17 -O2 -o dev/snakes_main.exe snakes/main.cpp
-    (from snakes/):
-        single-thread:  g++.exe -std=c++17 -DNDEBUG -O3 main.cpp -o run
-        threaded:       g++.exe -std=c++17 -DNDEBUG -O3 -pthread main.cpp -o run
+-- Compile (from snakes/): 
+    (test):
+        g++ -std=c++17 -DNDEBUG -O3 test.cpp -o test
+    (train):
+        g++.exe -std=c++17 -DNDEBUG -O3 -pthread main.cpp -o run
 
--- Run:
-    (from NNProj/):
-        .\dev\snakes_main.exe
+-- Run (from snakes/):
+    (test):
+        ./test <model_path_relative_to_snakes/>
     (from snakes/):
-        ./run
+        ./train <ARGS> <ARGS> <ARGS> <ARGS>
 
 
 - What you'll see: one line per generation, e.g.:
@@ -21,7 +20,7 @@ $ > Saving...
 $ > Saved: trained_networks/run_1
 
 
-- Every 30 gens (batch_save) it saves to 
+- Every <N> gens (batch_save) it saves to 
     trained_networks/run_<N>/: best.simple_net
         , current.simple_net (for resume/early-stop)
         , and performance.txt (fitness, gen, score, game-over screenshots of best and current).

@@ -41,8 +41,10 @@ inline void enableVt() {
 
 // Pure game environment. It knows nothing about neural networks, fitness,
 // or training loops -- callers step() it and read getState() themselves.
-// Move encoding (unchanged, so old nets keep their meaning):
-//   1 = left, 2 = up, 3 = right, 4 = down.
+// Move encoding: step() takes a relative move (1 = turn left, 2 = straight,
+// 3 = turn right) relative to the snake's current heading. The heading is
+// tracked internally (snake.direction) as an absolute direction:
+// 1 = left, 2 = up, 3 = right, 4 = down.
 struct SnakesGame {
     struct Pos {
         int x, y;
@@ -65,6 +67,15 @@ struct SnakesGame {
         size_t size = 1;         // == body.size(), kept in sync
         int head_x = 0, head_y = 0;   // == body.front(), kept in sync
         int tail_x = 0, tail_y = 0;   // == body.back(), kept in sync
+
+        Snake(int board_size) {
+            head_x = rand() % (board_size - 1);
+            head_y = rand() % (board_size - 1);
+            tail_x = head_x;
+            tail_y = head_y;
+        }
+
+        Snake() = default;
     };
 
     struct Apple {
@@ -80,12 +91,15 @@ struct SnakesGame {
 
     // Constructs a fresh game on a square board. seed lets you replay a run
     // deterministically.
-    SnakesGame() : SnakesGame(10) {}
+    SnakesGame() : SnakesGame(10) {
+        snake = Snake(10);
+    }
 
     SnakesGame(size_t _board_size, unsigned seed = std::random_device{}())
         : board_size(_board_size)
         , board(_board_size, _board_size, 0)
         , rng(seed) {
+        snake = Snake(board_size);
         reset();
     }
 
@@ -94,9 +108,9 @@ struct SnakesGame {
         game_ticks = 0;
         game_over = 0;
         max_game_tick = board_size * board_size * 30;
-        snake = Snake();
+        snake = Snake(board_size);
         const int mid = (int)(board_size / 2);
-        snake.body = { Pos{mid, mid} };
+        snake.body = { Pos{snake.head_x, snake.head_y} };
         syncGeometry();
         apple = Apple();
         spawnApple();
@@ -121,18 +135,29 @@ struct SnakesGame {
         if(game_over == 0) game_over = cause;
     }
 
-    // Execute one move (1..4). Throws on an invalid move so a bad caller
-    // fails loudly instead of silently freezing the snake.
+    // Execute one relative move: 1 = turn left, 2 = straight, 3 = turn right,
+    // relative to the current heading. The heading is tracked internally as an
+    // absolute direction (1 = left, 2 = up, 3 = right, 4 = down), so a
+    // reversal is impossible by construction. Throws on an invalid move so a
+    // bad caller fails loudly instead of silently freezing the snake.
     // Returns cause 0 (alive), 1 (wall), 2 (body), 3 (win) + whether it ate.
     StepResult step(int move) {
-        if(move < 1 || move > 4)
+        if(move < 1 || move > 3)
             throw std::runtime_error("SnakesGame::step: invalid move " + std::to_string(move));
         if(game_over != 0) return {game_over, false};
 
+        // Resolve the relative input against the current heading. Before the
+        // snake has moved (direction 0) it is treated as facing up, matching
+        // getState().
+        const int base = (snake.direction == 0) ? 2 : snake.direction;
+        const int dir = (move == 1) ? (base == 1 ? 4 : base - 1)
+                      : (move == 3) ? (base == 4 ? 1 : base + 1)
+                      : base;
+
         const int dx[5] = {0, -1, 0, 1, 0};
         const int dy[5] = {0, 0, -1, 0, 1};
-        const int nx = snake.head_x + dx[move];
-        const int ny = snake.head_y + dy[move];
+        const int nx = snake.head_x + dx[dir];
+        const int ny = snake.head_y + dy[dir];
 
         // Wall
         if(nx < 0 || nx >= (int)board_size || ny < 0 || ny >= (int)board_size) {
@@ -159,7 +184,7 @@ struct SnakesGame {
 
         // Commit the move.
         snake.prev_direction = snake.direction;
-        snake.direction = move;
+        snake.direction = dir;
         snake.body.push_front(Pos{nx, ny});
         if(!eating) snake.body.pop_back();
         syncGeometry();
@@ -234,30 +259,53 @@ struct SnakesGame {
         }
     }
 
-    // Free cells from the head along (dx, dy) until a wall or body cell.
-    float rayDistance(int dx, int dy) const {
+    // 1. Wall Distance: Steps out until hitting the outer board boundary
+    float rayWallDistance(int hx, int hy, int dx, int dy) const {
+        if (dx == 0 && dy == 0) return 0.0f;
         for(int s = 1; ; ++s) {
-            const int x = snake.head_x + dx * s, y = snake.head_y + dy * s;
-            if(x < 0 || x >= (int)board_size || y < 0 || y >= (int)board_size) return (float)(s - 1);
-            if(board(y, x) == 1) return (float)(s - 1);
+            const int x = hx + dx * s, y = hy + dy * s;
+            if(x < 0 || x >= (int)board_size || y < 0 || y >= (int)board_size) {
+                return (float)(s - 1);
+            }
         }
     }
 
-    // 18 hand-crafted features. Layout is compatible with the old game so
-    // existing .simple_net files keep working; values are now correct:
-    //   [0]  direction / 4
-    //   [1]  size / board_size^2
-    //   [2]  distance from the cell ahead of the head to the apple / board_size
-    //   [3]  distance from the head to the apple / board_size
-    //   [4]  game_ticks / max_game_tick          (normalized; was broken)
-    //   [5]  wall distance ahead
-    //   [6]  wall distance left  (relative to facing)
-    //   [7]  wall distance right (relative to facing)   (was permuted for dir 4)
-    //   [8]  apple offset forward (+/-, snake's frame)
-    //   [9]  apple offset right (+/-, snake's frame)
-    //   [10..17] 8 ray casts around the head (relative to facing) / board_size
+    // 2. Body Distance: Steps out until hitting the snake's body or a wall
+    float rayBodyDistance(int hx, int hy, int dx, int dy) const {
+        if (dx == 0 && dy == 0) return 0.0f;
+        for(int s = 1; ; ++s) {
+            const int x = hx + dx * s, y = hy + dy * s;
+            // If it hits a wall before finding a body, return max distance (clear)
+            if(x < 0 || x >= (int)board_size || y < 0 || y >= (int)board_size) {
+                return (float)(s - 1);
+            }
+            // If it hits a body segment (assuming 1 represents the body)
+            if(board(y, x) == 1) {
+                return (float)(s - 1);
+            }
+        }
+    }
+
+    // 3. Food Direction: Returns 1.0 if the apple lies along this specific ray vector, 0.0 otherwise
+    float rayFoodDistance(int hx, int hy, int dx, int dy) const {
+        if (dx == 0 && dy == 0) return 0.0f;
+        for(int s = 1; ; ++s) {
+            const int x = hx + dx * s, y = hy + dy * s;
+            // Stop searching if out of bounds
+            if(x < 0 || x >= (int)board_size || y < 0 || y >= (int)board_size) {
+                break;
+            }
+            // Check if apple coordinates match this ray step
+            if(x == apple.x && y == apple.y) {
+                return 1.0f;
+            }
+        }
+        return 0.0f;
+    }
+
+    // 20 hand-crafted features. Layout is compatible with the old game so
     std::vector<float> getState() const {
-        std::vector<float> state(getStateSize());
+        std::vector<float> state(24);
         const float max_dist = (float)board_size;
         const int hx = snake.head_x, hy = snake.head_y;
 
@@ -272,48 +320,46 @@ struct SnakesGame {
         }
         const int r_dx = -f_dy, r_dy = f_dx; // snake's right vector
 
-        state[0] = float(snake.direction) / 4.0f;
-        state[1] = float(snake.size) / float(board_size * board_size);
-        state[2] = getDistance(hx + f_dx, hy + f_dy, apple.x, apple.y) / max_dist;
-        state[3] = getDistance(hx, hy, apple.x, apple.y) / max_dist;
-        state[4] = float(game_ticks) / float(max_game_tick);
-
-        // Wall distances in the snake's own frame: same slots for every facing
-        state[5] = wallDistance(f_dx, f_dy);     // front
-        state[6] = wallDistance(-r_dx, -r_dy);   // left
-        state[7] = wallDistance(r_dx, r_dy);     // right
-
-        // Apple offset in the snake's frame
-        state[8] = ((apple.x - hx) * f_dx + (apple.y - hy) * f_dy) / max_dist;
-        state[9] = ((apple.x - hx) * r_dx + (apple.y - hy) * r_dy) / max_dist;
-
-        // 8 rays around the head
+        // 8 relative directions around the head
         const int rel_dirs[8][2] = {
-            { f_dx,          f_dy          }, // forward
-            { f_dx + r_dx,   f_dy + r_dy   }, // forward-right
-            { r_dx,          r_dy          }, // right
-            {-f_dx + r_dx,  -f_dy + r_dy   }, // backward-right
-            {-f_dx,         -f_dy          }, // backward
-            {-f_dx - r_dx,  -f_dy - r_dy   }, // backward-left
-            {-r_dx,         -r_dy          }, // left
-            { f_dx - r_dx,   f_dy - r_dy   }  // forward-left
+            { f_dx,        f_dy        }, // 0: forward
+            { f_dx + r_dx, f_dy + r_dy }, // 1: forward-right
+            { r_dx,        r_dy        }, // 2: right
+            {-f_dx + r_dx, -f_dy + r_dy }, // 3: backward-right
+            {-f_dx,       -f_dy        }, // 4: backward
+            {-f_dx - r_dx, -f_dy - r_dy }, // 5: backward-left
+            {-r_dx,       -r_dy        }, // 6: left
+            { f_dx - r_dx, f_dy - r_dy }  // 7: forward-left
         };
-        for(int i = 0; i < 8; ++i)
-            state[10 + i] = rayDistance(rel_dirs[i][0], rel_dirs[i][1]) / max_dist;
+
+        for(int i = 0; i < 8; ++i) {
+            int dx = rel_dirs[i][0];
+            int dy = rel_dirs[i][1];
+
+            // 1. Wall Distance (Indices 0 - 7)
+            state[i] = rayWallDistance(hx, hy, dx, dy) / max_dist;
+
+            // 2. Body Distance (Indices 8 - 15)
+            state[8 + i] = rayBodyDistance(hx, hy, dx, dy) / max_dist;
+
+            // 3. Food Direction / Distance (Indices 16 - 23)
+            state[16 + i] = rayFoodDistance(hx, hy, dx, dy) / max_dist;
+        }
 
         return state;
     }
 
-    // Must stay 18: existing .simple_net files validate their input size
+    // Must stay 20: existing .simple_net files validate their input size
     // against this at load time.
-    size_t getStateSize() const { return 18; }
+    size_t getStateSize() const { return 24; }
 
-    // Manual/testing play: keep moving in the current direction until death.
+    // Manual/testing play: keep moving straight in the current direction
+    // until death.
     int run(bool display = false, int frame_delay_ms = 0) {
         if(display) display_game(true);
         while(game_over == 0) {
             if(snake.direction == 0) break;
-            const StepResult r = step(snake.direction);
+            const StepResult r = step(2);
             if(display) {
                 display_game(false); // overwrite the previous frame, no flicker
                 std::this_thread::sleep_for(std::chrono::milliseconds(frame_delay_ms));

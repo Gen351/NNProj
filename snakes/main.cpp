@@ -93,12 +93,13 @@ public:
 
 int main(int argc, char* argv[]) {
     std::string continue_training = "";
-    int max_gen = 100'000;
-    int batch_save = 100;
+    int max_gen = 1'000'000;
+    int batch_save = -1;
     float mutation_chance = 0.18f;
     float sigma = 0.05f;
-    int pop_size = 50;
+    int pop_size = 1000;
     int evals_per_net = 5;
+
 
     // Read User Args ============== //
     for (int i = 1; i < argc; ++i) {
@@ -134,26 +135,24 @@ int main(int argc, char* argv[]) {
     }
 
     // Train Variables ============= //
-    const int board_size = 20;
+    const int board_size = 35;
     
     // Population ES settings
-    const int num_elites = pop_size / 5;        // Top networks preserved unchanged
-    const int tournament_k = 5;                 // Tournament selection size
+    const int num_elites = pop_size * 0.01;      // Top networks preserved unchanged
+    const int tournament_k = num_elites / 2;    // Tournament selection size
     
-    float best_fitness = -99999.0f;
+    float best_fitness = -999999999.0f;
     SimpleNet bestNet;
     RunSnapshot best_snapshot;
     // ============================= //
-    
-    
+        
     // Need to create now for getStateSize();
     SnakesGame game(board_size);
     
     // Network Variables =========== //
     const size_t input = game.getStateSize();
-    const size_t output = 4;
+    const size_t output = 3;
     // ============================= //
-
 
 
     // Network Design ============== //
@@ -167,17 +166,14 @@ int main(int argc, char* argv[]) {
     auto make_net = [&](void) -> SimpleNet {
         SimpleNet n;
 
-        n.addLayer(std::make_unique<SimpleLayer>(input, 36));
-        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
+        n.addLayer(std::make_unique<SimpleLayer>(input, 16));
+        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
         
-        n.addLayer(std::make_unique<SimpleLayer>(36, 50));
-        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
+        n.addLayer(std::make_unique<SimpleLayer>(16, 10));
+        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
         
-        n.addLayer(std::make_unique<SimpleLayer>(50, 18));
-        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
-
-        n.addLayer(std::make_unique<SimpleLayer>(18, output));
-        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::TANH));
+        n.addLayer(std::make_unique<SimpleLayer>(10, output));
+        n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
 
         return n;
     };
@@ -239,7 +235,8 @@ int main(int argc, char* argv[]) {
     
     // Thread pool for parallel evaluation
     const int num_threads = std::thread::hardware_concurrency();
-    ThreadPool pool(num_threads > 0 ? num_threads / 2 : 4);
+    ThreadPool pool(num_threads > 0 ? int(num_threads * 0.75) : 4);
+    std::cout << "Thread Count: " << num_threads << "\nUsed: " << (num_threads > 0 ? int(num_threads * 0.75) : 4) << "\n";
     
     auto eval_individual = [&](Individual& ind) -> float {
         float total_fitness = 0.0f;
@@ -299,6 +296,17 @@ int main(int argc, char* argv[]) {
             bestNet = population[0].net;
             best_fitness = population[0].fitness;
             best_snapshot = makeSnapshot(population[0].best_game, best_fitness, gen_count);
+       
+            if(batch_save == -1) {
+                std::cout << "Saving...\n";
+                save(run_dir
+                    , bestNet
+                    , population[0].net
+                    , best_snapshot
+                    , makeSnapshot(population[0].best_game, population[0].fitness, gen_count)
+                    , board_size);
+                std::cout << "Saved: " << run_dir << "\n";
+            }
         }
         
         // Display
@@ -313,7 +321,7 @@ int main(int argc, char* argv[]) {
                   << "\n";
         
         // Save
-        if(gen_count != 0 && gen_count % batch_save == 0) {
+        if(batch_save != -1 && gen_count != 0 && gen_count % batch_save == 0) {
             std::cout << "Saving...\n";
             save(run_dir
                 , bestNet
@@ -371,21 +379,30 @@ static float gauss(std::mt19937& engine, const float sigma) {
     return dist(engine) * sigma;
 }
 
-void mutate(SimpleNet& net
-        , const float mutation_chance
-        , const float sigma) {
+void mutate(SimpleNet& net, const float mutation_chance, const float sigma) {
     static thread_local std::mt19937 engine(std::random_device{}());
 
     for(auto& l : net.layers) {
-
-        // wtf is this, is this because of my bad implementaion?
         SimpleLayer* layer = dynamic_cast<SimpleLayer*>(l.get());
-        if(!layer) continue; // activation layer        
+        if(!layer) continue; // activation layer
 
-        for(float& w : layer->weights.data)
-            if(shouldMutate(engine, mutation_chance)) w += gauss(engine, sigma);
-        for(float& b : layer->biases)
-            if(shouldMutate(engine, mutation_chance)) b += gauss(engine, sigma);
+        for(float& w : layer->weights.data) {
+            const float specific_mutation_chance = (w == 0.0f) ? mutation_chance * 1.75f : mutation_chance;
+            if(shouldMutate(engine, specific_mutation_chance)) {
+                w += gauss(engine, sigma);
+                // Clamp weights to prevent explosion and activation saturation
+                w = std::clamp(w, -8.0f, 8.0f); 
+            }
+        }
+
+        for(float& b : layer->biases) {
+            const float specific_mutation_chance = (b == 0.0f) ? mutation_chance * 1.75f : mutation_chance;
+            if(shouldMutate(engine, specific_mutation_chance)) {
+                b += gauss(engine, sigma);
+                // Clamp biases as well
+                b = std::clamp(b, -8.0f, 8.0f);
+            }
+        }
     }
 }
 
