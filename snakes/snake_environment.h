@@ -137,7 +137,7 @@ struct SnakesGame {
 
     // Execute one relative move: 1 = turn left, 2 = straight, 3 = turn right,
     // relative to the current heading. The heading is tracked internally as an
-    // absolute direction (1 = left, 2 = up, 3 = right, 4 = down), so a
+    // absolute direction (1 = left,  = up, 3 = right, 4 = down), so a
     // reversal is impossible by construction. Throws on an invalid move so a
     // bad caller fails loudly instead of silently freezing the snake.
     // Returns cause 0 (alive), 1 (wall), 2 (body), 3 (win) + whether it ate.

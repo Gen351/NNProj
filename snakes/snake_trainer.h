@@ -35,13 +35,6 @@ inline int pickMove(const SnakesGame& game, const std::vector<float>& output) {
     return move;
 }
 
-// Stateless per-tick shaping reward for one live state:
-inline float simpleFitness(const std::vector<float>& state,
-                           size_t game_ticks) {
-    float f = 0.0f;
-    return f;
-}
-
 // Runs one full episode for a net. Resets the game first. The game object
 // holds the final state afterwards (useful for screenshots/replays).
 // Death causes: 1 wall, 2 body, 3 win, 4 tick cap, 5 starved (out-of-band).
@@ -66,12 +59,12 @@ inline RunResult run_net(SnakesGame& game, SimpleNet& net, bool display = false,
         // Ate an apple? Later apples are worth more (harder to reach)
         if(r.ate) {
             result.fitness += 1200.0f;
-            result.fitness -= ((float)max_ticks_without_eat / 1000.0f) * (ticks_since_eat);
+            result.fitness -= ((float)max_ticks_without_eat / 1150.0f) * (ticks_since_eat);
             ticks_since_eat = 0;
         }
 
         if(game.snake.size == 1) {
-            result.fitness -= ((float)max_ticks_without_eat / 1000.0f) * (ticks_since_eat);
+            result.fitness -= ((float)max_ticks_without_eat / 1200.0f) * (ticks_since_eat);
         }
 
         if(display) {
@@ -91,7 +84,7 @@ inline RunResult run_net(SnakesGame& game, SimpleNet& net, bool display = false,
     // Hit the tick cap: survived the run.
     if(!game.isGameOver() && game.game_ticks >= game.max_game_tick) {
         game.terminate(4);
-        result.fitness -= ((float)max_ticks_without_eat * 0.5f) * (1.0f - (float)game.game_ticks / (float)game.max_game_tick);
+        result.fitness -= ((float)max_ticks_without_eat * 0.4f) * (1.0f - (float)game.game_ticks / (float)game.max_game_tick);
     }
 
     // Death-time scaled penalties: dying early is punished much harder than
@@ -99,9 +92,9 @@ inline RunResult run_net(SnakesGame& game, SimpleNet& net, bool display = false,
     const int cause = game.deathCause();
     const float max_tick = (float)game.max_game_tick;
     if(cause == 1 || cause == 5) {
-        result.fitness -= ((float)max_ticks_without_eat * 0.8f) * (1.0f - (float)game.game_ticks / max_tick);
+        result.fitness -= ((float)max_ticks_without_eat * 0.85f) * (1.0f - (float)game.game_ticks / max_tick);
     } else if(cause == 2) {
-        result.fitness -= ((float)max_ticks_without_eat * 0.35f) * (1.0f - (float)game.game_ticks / max_tick);
+        result.fitness -= ((float)max_ticks_without_eat * 0.25f) * (1.0f - (float)game.game_ticks / max_tick);
     } else if(cause == 3) {
         result.fitness += 500000.0f; // won: board full
     }
@@ -110,7 +103,7 @@ inline RunResult run_net(SnakesGame& game, SimpleNet& net, bool display = false,
     result.game_ticks = game.game_ticks;
     result.score = (int)game.snake.size;
 
-    result.fitness += (1.0f * (float)game.game_ticks / max_tick);
+    result.fitness += (0.9f * (float)game.game_ticks / max_tick);
 
     return result;
 }
