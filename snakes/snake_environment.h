@@ -107,7 +107,7 @@ struct SnakesGame {
     void reset() {
         game_ticks = 0;
         game_over = 0;
-        max_game_tick = board_size * board_size * board_size;
+        max_game_tick = board_size * board_size * board_size * (board_size / 2);
         snake = Snake(board_size);
         const int mid = (int)(board_size / 2);
         snake.body = { Pos{snake.head_x, snake.head_y} };

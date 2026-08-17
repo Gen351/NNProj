@@ -25,6 +25,27 @@ public:
         return std::make_unique<SimpleActivationLayer>(*this);
     }
 
+	std::string getType() const override {return "ACT";}
+
+    std::string getActType() const {
+        switch(getActivation()) {
+            case SimpleActivationLayer::ActivationType::SIGM:
+                return "SIGM";
+                break;
+            case SimpleActivationLayer::ActivationType::TANH:
+                return "TANH";
+                break;
+            case SimpleActivationLayer::ActivationType::LEAK:
+                return "LEAK";
+                break;
+            case SimpleActivationLayer::ActivationType::RELU:
+                return "RELU";
+                break;
+        }
+        return "SIGM";
+    }
+    
+
 private:
     ActivationType activationType;
 
@@ -52,7 +73,6 @@ private:
         return output;
     }
 
-	std::string getType() const override {return "ACT";}
 
 private:
     float Sigmoid(float x) {

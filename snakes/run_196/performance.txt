@@ -1,0 +1,115 @@
+BOARD_SIZE: 50
+Best;
+    Fitness         : 430762
+    Gen             : 40
+    Score           : 136
+Game Over Screenshot:
+----------------------------------------------------
+|       S                            sssss         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|   A   s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       ssssssssssssssssssssssssssssssssss         |
+----------------------------------------------------
+Current;
+    Fitness         : 430762
+    Gen             : 40
+    Score           : 136
+Game Over Screenshot:
+----------------------------------------------------
+|       S                            sssss         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|   A   s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       s                                s         |
+|       ssssssssssssssssssssssssssssssssss         |
+----------------------------------------------------

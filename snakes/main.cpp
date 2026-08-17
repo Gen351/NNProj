@@ -169,13 +169,13 @@ int main(int argc, char* argv[]) {
     auto make_net = [&](void) -> SimpleNet {
         SimpleNet n;
 
-        n.addLayer(std::make_unique<SimpleLayer>(input, 16));
+        n.addLayer(std::make_unique<SimpleLayer>(input, 20));
         n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
         
-        n.addLayer(std::make_unique<SimpleLayer>(16, 10));
+        n.addLayer(std::make_unique<SimpleLayer>(20, 18));
         n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
         
-        n.addLayer(std::make_unique<SimpleLayer>(10, output));
+        n.addLayer(std::make_unique<SimpleLayer>(18, output));
         n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
 
         return n;

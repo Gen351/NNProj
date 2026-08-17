@@ -1,0 +1,31 @@
+BOARD_SIZE: 8
+Best;
+    Fitness         : 9.36185e+06
+    Gen             : 68
+    Score           : 64
+Game Over Screenshot:
+----------
+|sSssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+----------
+Current;
+    Fitness         : 9.36185e+06
+    Gen             : 68
+    Score           : 64
+Game Over Screenshot:
+----------
+|sSssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+|ssssssss|
+----------
