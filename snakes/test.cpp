@@ -13,16 +13,19 @@ int main(int argc, char* argv[]) {
     srand(std::time(nullptr));
 
     if(argc < 2) {
-        std::cout << "Usage: test <model.simple_net> [speed_ms]\n"
-                  << "  model.simple_net : path to a trained net (e.g. ./trained_networks/run_19/best.simple_net)\n"
-                  << "  speed_ms         : ms per frame (default 80 = watchable)\n"
-                  << "  sggstd_board_sz  : board size\n";
+        std::cout << "\nUsage: test <model.simple_net> [speed_ms] [board_sz] <show?(0:1)>\n"
+                  << "  -model.simple_net : path to a trained net relative to test.exe\n"
+                  << "                    (e.g. ./trained_networks/run_19/best.simple_net)\n"
+                  << "  -speed_ms         : ms per frame (default 80 = watchable)\n"
+                  << "  -sggstd_board_sz  : board size\n"
+				  << "  -show?            : show the AI solving the game <0 : 1>\n";
         return 1;
     }
 
     const std::string model_path = argv[1];
     const int speed_ms = (argc >= 3) ? std::atoi(argv[2]) : 80;
     const int suggested_board_size = (argc >= 4) ? std::atoi(argv[3]) : 35;
+	const bool show_game = (argc >= 5) ? (std::atoi(argv[4]) == 0 ? false : true) : true;
 
     SimpleNet net;
     try {
@@ -48,12 +51,14 @@ int main(int argc, char* argv[]) {
 
     SnakesGame game(board_size);
 
-    const SnakeTrainer::RunResult res = SnakeTrainer::run_net(game, net, true, speed_ms);
+    const SnakeTrainer::RunResult res = SnakeTrainer::run_net(game, net, show_game, speed_ms);
+
+	game.display_game(false);
+    std::cout << std::flush;
 
     // Show the model used
-    std::cout << "Played: " << board_size << "x" << board_size
-              << "\n> Model: " << model_path
-              << "\n> Layers:\n\n";
+    std::cout << "\n\n\n\n> Model: " << model_path
+              << "\n> Layers:\n";
 
     // 1. Extract Topology (Input size of first layer + output sizes of all layers)
     std::vector<size_t> topology;
@@ -72,12 +77,13 @@ int main(int argc, char* argv[]) {
     // 2. Procedural ASCII Art Generator
     // Maps actual node count to visually aesthetic string length
     auto get_v = [](size_t size) -> int {
-        if (size >= 40) return 12;
-        if (size >= 30) return 10;
-        if (size >= 24) return 8;
-        if (size >= 16) return 6;
-        if (size >= 10) return 4;
-        if (size >= 4)  return 2;
+        if (size >= 40) return 18;
+        if (size >= 30) return 16;
+        if (size >= 25) return 14;
+        if (size >= 20) return 12;
+        if (size >= 16) return 10;
+        if (size >= 10) return 8;
+        if (size >= 4)  return 6;
         return 1;
     };
 
@@ -129,7 +135,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::cout << "\n\nFitness: " << res.fitness << "\n"
+    std::cout << "\nFitness: " << res.fitness << "\n"
               << "Death Cause: " << res.death_cause
               << " (1=wall 2=body 3=win 4=tick cap 5=starved)\n"
               << "score: " << res.score - 1 << "\n";

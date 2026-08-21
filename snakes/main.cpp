@@ -108,14 +108,14 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         size_t eq = arg.find('=');
         if (eq == std::string::npos) continue;
-        
+
         std::string key = arg.substr(0, eq);
         std::string val = arg.substr(eq + 1);
-        
+
         if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
             val = val.substr(1, val.size() - 2);
         }
-        
+
         if (key == "CONTINUE_TRAINING") continue_training = val;
         else if (key == "MAX_GEN") max_gen = std::stoi(val);
         else if (key == "BATCH_SAVE") batch_save = std::stoi(val);
@@ -139,19 +139,19 @@ int main(int argc, char* argv[]) {
 
     // Train Variables ============= //
     const int board_size = suggested_board_size;
-    
+
     // Population ES settings
     const int num_elites = pop_size * 0.01;      // Top networks preserved unchanged
     const int tournament_k = num_elites / 2;    // Tournament selection size
-    
+
     float best_fitness = -999999999.0f;
     SimpleNet bestNet;
     RunSnapshot best_snapshot;
     // ============================= //
-        
+
     // Need to create now for getStateSize();
     SnakesGame game(board_size);
-    
+
     // Network Variables =========== //
     const size_t input = game.getStateSize();
     const size_t output = 3;
@@ -171,29 +171,29 @@ int main(int argc, char* argv[]) {
 
         n.addLayer(std::make_unique<SimpleLayer>(input, 20));
         n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
-        
+
         n.addLayer(std::make_unique<SimpleLayer>(20, 18));
         n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
-        
+
         n.addLayer(std::make_unique<SimpleLayer>(18, output));
         n.addLayer(std::make_unique<SimpleActivationLayer>(SimpleActivationLayer::SIGM));
 
         return n;
     };
-    
+
     SimpleNet net;
     if(continue_training.empty()) {
         net = make_net();
     } else {
         try {
             net = SimpleNetReader::load(continue_training);
-            
+
             const SimpleLayer* first = dynamic_cast<const SimpleLayer*>(net.layers[0].get());
             if (!first) throw std::runtime_error("First layer not SimpleLayer");
-            if (first->weights.cols() != input) 
-                throw std::runtime_error("Input size mismatch: expected " + std::to_string(input) + 
+            if (first->weights.cols() != input)
+                throw std::runtime_error("Input size mismatch: expected " + std::to_string(input) +
                                          ", got " + std::to_string(first->weights.cols()));
-            
+
             const SimpleLayer* last = nullptr;
             for (auto it = net.layers.rbegin(); it != net.layers.rend(); ++it) {
                 last = dynamic_cast<const SimpleLayer*>(it->get());
@@ -201,7 +201,7 @@ int main(int argc, char* argv[]) {
             }
             if (!last || last->weights.rows() != output)
                 throw std::runtime_error("Output size mismatch: expected " + std::to_string(output));
-            
+
         } catch(const std::exception& e) {
             throw std::runtime_error("Network Design: Invalid Model Load: " + std::string(e.what()));
         }
@@ -217,11 +217,11 @@ int main(int argc, char* argv[]) {
         int score = 0;
         SnakesGame best_game;   // final state of this net's best single run
     };
-    
+
     // Initialize population
     std::vector<Individual> population;
     population.reserve(pop_size);
-    
+
     // Seed with loaded net + mutations
     population.push_back({net, -99999.0f, 0});
     for (int i = 1; i < pop_size; ++i) {
@@ -229,18 +229,18 @@ int main(int argc, char* argv[]) {
         mutate(mutant, mutation_chance, sigma);
         population.push_back({std::move(mutant), -99999.0f, 0});
     }
-    
+
     // Pin the run version once per session
     const std::string run_dir = "trained_networks/run_" + std::to_string(findNextRunVersion());
-    
+
     static thread_local std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<int> dist_idx(0, pop_size - 1);
-    
+
     // Thread pool for parallel evaluation
     const int num_threads = std::thread::hardware_concurrency();
     ThreadPool pool(num_threads > 0 ? int(num_threads * 0.75) : 4);
     std::cout << "Thread Count: " << num_threads << "\nUsed: " << (num_threads > 0 ? int(num_threads * 0.75) : 4) << "\n";
-    
+
     auto eval_individual = [&](Individual& ind) -> float {
         float total_fitness = 0.0f;
         int max_score = 0;
@@ -258,48 +258,48 @@ int main(int argc, char* argv[]) {
         ind.best_game = std::move(best_game);
         return ind.fitness;
     };
-    
+
     auto eval_population = [&](std::vector<Individual>& pop) {
         std::vector<std::future<float>> futures;
         futures.reserve(pop.size());
-        
+
         for (auto& ind : pop) {
             futures.push_back(pool.enqueue([&ind, &eval_individual]() -> float {
                 return eval_individual(ind);
             }));
         }
-        
+
         // Wait for all evaluations to complete
         for (auto& fut : futures) fut.get();
     };
-    
+
     // Initial evaluation
     eval_population(population);
-    
+
     // Sort by fitness descending
     auto sort_pop = [&](void) {
-        std::sort(population.begin(), population.end(), 
+        std::sort(population.begin(), population.end(),
             [](const Individual& a, const Individual& b) { return a.fitness > b.fitness; });
     };
     sort_pop();
-    
+
     bestNet = population[0].net;
     best_fitness = population[0].fitness;
     best_snapshot = makeSnapshot(population[0].best_game, best_fitness, 0);
-    
+
     int gen_count = 0;
-    
+
     while(max_gen == -1 || gen_count <= max_gen) {
         // Evaluate all in parallel (re-evaluate elites too for noise handling)
         eval_population(population);
         sort_pop();
-        
+
         // Update global best
         if (population[0].fitness > best_fitness) {
             bestNet = population[0].net;
             best_fitness = population[0].fitness;
             best_snapshot = makeSnapshot(population[0].best_game, best_fitness, gen_count);
-       
+
             if(batch_save == -1) {
                 std::cout << "Saving...\n";
                 save(run_dir
@@ -311,7 +311,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "Saved: " << run_dir << "\n";
             }
         }
-        
+
         // Display
         std::cout << "Gen " << gen_count
                   << " | Best: " << best_fitness
@@ -322,7 +322,7 @@ int main(int argc, char* argv[]) {
                   << " | Best Score: " << best_snapshot.score
                   << " | Pop Best Score: " << population[0].score
                   << "\n";
-        
+
         // Save
         if(batch_save != -1 && gen_count != 0 && gen_count % batch_save == 0) {
             std::cout << "Saving...\n";
@@ -335,16 +335,16 @@ int main(int argc, char* argv[]) {
             std::cout << "Saved: " << run_dir << "\n";
         }
         gen_count++;
-        
+
         // Selection & Reproduction
         std::vector<Individual> next_gen;
         next_gen.reserve(pop_size);
-        
+
         // Elitism: keep top num_elites unchanged
         for (int i = 0; i < num_elites; ++i) {
             next_gen.push_back(population[i]);
         }
-        
+
         // Generate offspring via tournament selection + mutation
         while ((int)next_gen.size() < pop_size) {
             // Tournament selection
@@ -353,15 +353,15 @@ int main(int argc, char* argv[]) {
                 int idx = dist_idx(rng);
                 if (population[idx].fitness > population[best_idx].fitness) best_idx = idx;
             }
-            
+
             SimpleNet child = population[best_idx].net;
             mutate(child, mutation_chance, sigma);
             next_gen.push_back({std::move(child), -99999.0f, 0});
         }
-        
+
         population = std::move(next_gen);
     }
-    
+
     // ============================= //
 
 
@@ -394,7 +394,7 @@ void mutate(SimpleNet& net, const float mutation_chance, const float sigma) {
             if(shouldMutate(engine, specific_mutation_chance)) {
                 w += gauss(engine, sigma);
                 // Clamp weights to prevent explosion and activation saturation
-                w = std::clamp(w, -8.0f, 8.0f); 
+                w = std::clamp(w, -8.0f, 8.0f);
             }
         }
 

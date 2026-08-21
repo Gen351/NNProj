@@ -1,4 +1,6 @@
-/dev/
+dev/
 *.exe
 
 trained_networks/
+
+snakes/with_gui/

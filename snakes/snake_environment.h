@@ -22,9 +22,10 @@ namespace SnakesColors {
     inline constexpr int WHITE_R = 255, WHITE_G = 255, WHITE_B = 255;
     inline constexpr int HEAD_R = 0,    HEAD_G = 255,  HEAD_B = 0;
     inline constexpr int BODY_R = 0,    BODY_G = 128,  BODY_B = 0;
+    inline constexpr int BODY_TAIL_R = 0, BODY_TAIL_G = 80, BODY_TAIL_B = 255;
     inline constexpr int APPLE_R = 255, APPLE_G = 0,   APPLE_B = 0;
-    inline constexpr int IND_R = 50,      IND_G = 50,      IND_B = 50;
-    inline constexpr int IND_DARK_R = 30, IND_DARK_G = 30, IND_DARK_B = 30;
+    inline constexpr int IND_R = 60,      IND_G = 60,      IND_B = 60;
+    inline constexpr int IND_DARK_R = 10, IND_DARK_G = 10, IND_DARK_B = 10;
 }
 
 inline void enableVt() {
@@ -370,7 +371,7 @@ struct SnakesGame {
     }
 
     // Screenshot only: renders the current game state once.
-    void display_game(bool clear_scr = true) {
+    void display_game(bool clear_scr=true) {
         enableVt();
 
         std::ostringstream frame;
@@ -378,26 +379,29 @@ struct SnakesGame {
         else {frame << "\x1b[H";}                   // later frames: overwrite in place
 
         frame << "\n\n\n\n";
-        // Cells the snake is heading toward (beside the head, and one more ahead)
-        int dir_indication_x = snake.head_x;
-        int dir_indication_y = snake.head_y;
-        int dir_indication2_x = dir_indication_x;
-        int dir_indication2_y = dir_indication_y;
-        switch(snake.direction) {
-            case 0: break;
-            case 1: dir_indication_x--; dir_indication2_x -= 2; break;
-            case 2: dir_indication_y--; dir_indication2_y -= 2; break;
-            case 3: dir_indication_x++; dir_indication2_x += 2; break;
-            case 4: dir_indication_y++; dir_indication2_y += 2; break;
+
+        // Body gradient: per-cell index along the snake (0 = head, size-1 = tail).
+        std::vector<int> body_index(board_size * board_size, -1);
+        for(size_t i = 0; i < snake.body.size(); ++i)
+            body_index[(size_t)snake.body[i].y * board_size + (size_t)snake.body[i].x] = (int)i;
+
+        // Direction ray from the head to the wall (or until obstructed).
+        // Stores the distance (in cells) from the head for each lit cell.
+        std::vector<int> dir_dist(board_size * board_size, -1);
+        if(snake.direction != 0) {
+            const int dx[5] = {0, -1, 0, 1, 0};
+            const int dy[5] = {0, 0, -1, 0, 1};
+            int s = 1;
+            while(true) {
+                const int x = snake.head_x + dx[snake.direction] * s;
+                const int y = snake.head_y + dy[snake.direction] * s;
+                if(x < 0 || x >= (int)board_size || y < 0 || y >= (int)board_size) break;
+                if(apple.x == x && apple.y == y) break;      // obstructed
+                if(board(y, x) == 1) break;                  // obstructed
+                dir_dist[(size_t)y * board_size + (size_t)x] = s;
+                s++;
+            }
         }
-        if(dir_indication_x < 0) dir_indication_x = 0;
-        if(dir_indication_x >= (int)board_size) dir_indication_x = (int)board_size - 1;
-        if(dir_indication_y < 0) dir_indication_y = 0;
-        if(dir_indication_y >= (int)board_size) dir_indication_y = (int)board_size - 1;
-        if(dir_indication2_x < 0) dir_indication2_x = 0;
-        if(dir_indication2_x >= (int)board_size) dir_indication2_x = (int)board_size - 1;
-        if(dir_indication2_y < 0) dir_indication2_y = 0;
-        if(dir_indication2_y >= (int)board_size) dir_indication2_y = (int)board_size - 1;
 
         const size_t n = board_size + 2;
         for(size_t row = 0; row < n; row++) {
@@ -425,19 +429,16 @@ struct SnakesGame {
                         b = SnakesColors::APPLE_B;
                     }
                     else if(board(br, bc) == 1) {
+                        const int i = body_index[br * board_size + bc];
+                        const float t = (snake.size > 1) ? (float)i / (float)(snake.size - 1) : 0.0f;
                         r = SnakesColors::BODY_R;
-                        g = SnakesColors::BODY_G;
-                        b = SnakesColors::BODY_B;
+                        g = (int)(SnakesColors::BODY_TAIL_G + (255 - SnakesColors::BODY_TAIL_G) * (1.0f - t));
+                        b = (int)(255.0f * t);
                     }
-                    else if(bc == (size_t)dir_indication_x && br == (size_t)dir_indication_y) {
-                        r = SnakesColors::IND_R;
-                        g = SnakesColors::IND_G;
-                        b = SnakesColors::IND_B;
-                    }
-                    else if(bc == (size_t)dir_indication2_x && br == (size_t)dir_indication2_y) {
-                        r = SnakesColors::IND_DARK_R;
-                        g = SnakesColors::IND_DARK_G;
-                        b = SnakesColors::IND_DARK_B;
+                    else if(dir_dist[br * board_size + bc] >= 0) {
+                        const float t = (float)dir_dist[br * board_size + bc] / (float)board_size;
+                        const int v = (int)(SnakesColors::IND_R + (SnakesColors::IND_DARK_R - SnakesColors::IND_R) * t);
+                        r = v; g = v; b = v;
                     }
                 }
 
