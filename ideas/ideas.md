@@ -31,8 +31,17 @@
 ## 8. 
 
 
+
+
 # TO DO:
 	- What is RL Network.
 	- Learn RNN.
 	- Make smaller CNN.
 	- Need data for training.
+
+
+
+# Current
+
+## 6. Chess Engine (Minimax + NNUE):
+	- Use a TUI/Ncurses interface. Evaluate board positions with an efficient neural network architecture trained on raw board state matrices.
