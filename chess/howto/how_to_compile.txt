@@ -1,0 +1,45 @@
+- How to compile and run the chess engine
+
+-- Compile (from chess/):
+        g++ -std=c++17 -DNDEBUG -O3 -pthread uci_main.cpp -o chess_engine
+
+-- Run (from chess/):
+    (UCI engine mode -- what you use with a GUI / for playing):
+        ./chess_engine
+    (with your neural net as evaluator):
+        ./chess_engine --net ../trained_networks/run_1/best.simple_net
+    (perft -- move-generation speed/correctness check):
+        ./chess_engine --perft 5
+        ./chess_engine --perft 4 "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1"
+    (self-test -- zobrist consistency + perft suite + quick self-game):
+        ./chess_engine --selftest
+
+
+- UCI mode: it speaks the standard UCI protocol on stdin/stdout.
+    Type commands and press enter. Minimal session:
+
+$ > uci                        (engine replies id name / option / uciok)
+$ > isready                    (engine replies readyok)
+$ > position startpos moves e2e4 e7e5 g1f3 b8c6
+$ > go depth 8                 (search to depth 8, prints info lines)
+$ >                            ... engine eventually prints: bestmove g8f6
+$ > quit
+
+    Other useful go forms:  go movetime 1000   (think exactly ~1s)
+                            go wtime 300000 btime 300000   (real clocks, ms)
+    Load net at runtime:    setoption name EvalFile value path/to/net.simple_net
+    Show board + eval:      d
+
+
+- What you'll see while searching:
+
+$ > info depth 7 score cp 35 nodes 15234 time 45 pv g1f3 g8f6 d2d4
+$ > bestmove g8f6
+
+    depth = ply searched | cp = centipawn eval (+ good for white)
+    nodes/time = search stats | pv = principal variation (planned line)
+
+
+- If the net fails validation on load, the engine keeps running with the
+  material+pst fallback and prints an "info string ERROR ..." line saying why
+  (usually input size != 781 -- see howto/createAI.md).
