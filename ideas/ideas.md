@@ -17,7 +17,7 @@
 
 
 ## 5. Real-time Object Tracker via Webcam:
-	- Capture video frames using OpenCV, pass downsampled regions through your custom CNN, and draw bounding boxes in ImGui.
+	- Capture video frames using OpenCV, pass downsampled regions through custom CNN, and draw bounding boxes in ImGui.
 
 
 ## 6. Chess Engine (Minimax + NNUE):

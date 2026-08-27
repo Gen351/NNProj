@@ -2,7 +2,7 @@
 //
 // Modes:
 //   chess_engine                        -- UCI protocol on stdin/stdout (default)
-//   chess_engine --net model.simple_net -- UCI with your trained net loaded at startup
+//   chess_engine --net model.backprop_net -- UCI with your trained net loaded at startup
 //   chess_engine --perft 5 ["FEN"]      -- move-generation correctness counts
 //   chess_engine --selftest             -- internal consistency checks + quick game
 //
@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -178,6 +179,14 @@ void runPerftCli(const std::string& fen, const int maxDepth) {
 
 // ---------------------------------------------------------------------------
 // UCI engine
+//
+// Lazy-SMP-style threading: "go" starts ONE primary Searcher (the only one
+// reporting info/bestmove) plus Threads-1 helper Searchers that search the
+// same position with the same limits and simply get discarded. Every
+// searcher -- primary or helper -- owns its OWN Evaluator instance; helpers
+// wrap the SAME shared_ptr<BackpropNet::Net> as the primary. That is safe
+// because a net is read-only during search, and it dodges the one real
+// sharing hazard: NetEvaluator's internal state buffer is per-instance.
 // ---------------------------------------------------------------------------
 struct Engine {
     chess::ChessGame game;
@@ -186,20 +195,42 @@ struct Engine {
     std::thread worker;
     std::atomic<bool> searching{false};
 
+    // Helper-searcher machinery. evaluator_factory rebuilds a fresh,
+    // self-contained Evaluator per helper (per-thread state buffers).
+    int searchThreads = [] {
+        const unsigned hw = std::thread::hardware_concurrency();
+        return hw > 2 ? static_cast<int>(hw) - 2 : 1;
+    }();
+    std::function<std::shared_ptr<chess::Evaluator>()> evaluatorFactory =
+        [] { return chess::makePstEvaluator(); };
+    std::vector<std::unique_ptr<chess::Searcher>> helperSearchers;
+    std::vector<std::shared_ptr<chess::Evaluator>> helperEvaluators;
+    std::vector<std::thread> helpers;
+
     chess::SearchLimits ponderRealLimits;   // clocks saved from "go ... ponder"
     bool pondering = false;
 
+    void stopHelpers() {
+        for (const auto& hs : helperSearchers) hs->stop();
+    }
+
     void joinSearch() {
         pondering = false;
+        stopHelpers();
         if (worker.joinable()) {
             if (searcher) searcher->stop();
             worker.join();
         }
+        for (auto& h : helpers) if (h.joinable()) h.join();
+        helpers.clear();
+        helperSearchers.clear();
+        helperEvaluators.clear();
         searching.store(false);
     }
 
     void launch(chess::SearchLimits lim) {
         joinSearch();
+
         searcher = std::make_unique<chess::Searcher>(*evaluator);
         searcher->onInfo = [](const chess::SearchInfo& i) {
             std::ostringstream out;
@@ -210,9 +241,21 @@ struct Engine {
             for (const chess::Move& m : i.pv) out << ' ' << chess::moveToUci(m);
             std::cout << out.str() << std::endl;
         };
+
+        const int n = std::clamp(searchThreads, 1, 64);
+        for (int i = 1; i < n; ++i) {
+            auto ev = evaluatorFactory();
+            auto hs = std::make_unique<chess::Searcher>(*ev);
+            chess::Searcher* raw = hs.get();
+            helperEvaluators.push_back(std::move(ev));   // keeps *ev alive
+            helperSearchers.push_back(std::move(hs));
+            helpers.emplace_back([this, raw, lim] { raw->think(game, lim); });
+        }
+
         searching.store(true);
         worker = std::thread([this, lim] {
             const chess::SearchResult r = searcher->think(game, lim);
+            stopHelpers();   // primary is done: release the helpers' cores now
             std::cout << (r.hasMove ? "bestmove " + chess::moveToUci(r.best)
                                     : "bestmove (none)") << std::endl;
             searching.store(false);
@@ -222,9 +265,14 @@ struct Engine {
 
 bool tryLoadNet(Engine& eng, const std::string& path) {
     try {
-        auto ev = chess::loadNetEvaluator(path);
+        auto net = std::make_shared<BackpropNet::Net>(BackpropNetReader::load(path));
         eng.joinSearch();
-        eng.evaluator = std::move(ev);
+        eng.evaluator = std::make_shared<chess::NetEvaluator>(net, path);
+        // Helpers rebuild their own NetEvaluator around this same shared net.
+        eng.evaluatorFactory = [net, path] {
+            return std::shared_ptr<chess::Evaluator>(
+                std::make_shared<chess::NetEvaluator>(net, path));
+        };
         std::cout << "info string loaded eval: " << eng.evaluator->name() << std::endl;
         return true;
     } catch (const std::exception& e) {
@@ -272,6 +320,8 @@ int uciLoop(const std::string& startupNetPath) {
             std::cout << "id name " << kEngineName << ' ' << kEngineVersion << "\n"
                       << "id author NNProj\n"
                       << "option name EvalFile type string default\n"
+                      << "option name Threads type spin default " << eng.searchThreads
+                      << " min 1 max 64\n"
                       << "uciok" << std::endl;
         } else if (cmd == "isready") {
             std::cout << "readyok" << std::endl;
@@ -283,6 +333,12 @@ int uciLoop(const std::string& startupNetPath) {
             std::getline(in, value);
             if (!value.empty() && value.front() == ' ') value.erase(0, 1);
             if (name == "EvalFile" && !value.empty()) tryLoadNet(eng, value);
+            else if (name == "Threads") {
+                try {
+                    eng.searchThreads = std::clamp(std::stoi(value), 1, 64);
+                    std::cout << "info string Threads set to " << eng.searchThreads << std::endl;
+                } catch (...) { }
+            }
         } else if (cmd == "ucinewgame") {
             eng.joinSearch();
             eng.game.reset();
@@ -329,7 +385,10 @@ int uciLoop(const std::string& startupNetPath) {
                 eng.launch(real);   // re-launch with the real clock budget
             }
         } else if (cmd == "stop") {
-            if (eng.searching.load() && eng.searcher) eng.searcher->stop();
+            if (eng.searching.load()) {
+                if (eng.searcher) eng.searcher->stop();
+                eng.stopHelpers();
+            }
         } else if (cmd == "quit") {
             eng.joinSearch();
             return 0;
@@ -362,7 +421,7 @@ void usage() {
         << kEngineName << ' ' << kEngineVersion << "\n\n"
         << "Usage:\n"
         << "  chess_engine                          UCI mode (default; pipe commands via stdin)\n"
-        << "  chess_engine --net FILE.simple_net    UCI mode with your trained net preloaded\n"
+        << "  chess_engine --net FILE.backprop_net  UCI mode with your trained net preloaded\n"
         << "  chess_engine --perft DEPTH [\"FEN\"]    perft node counts (default: startpos)\n"
         << "  chess_engine --selftest               rules/search consistency checks\n";
 }

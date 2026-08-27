@@ -7,12 +7,46 @@
     (UCI engine mode -- what you use with a GUI / for playing):
         ./chess_engine
     (with your neural net as evaluator):
-        ./chess_engine --net ../trained_networks/run_1/best.simple_net
+        ./chess_engine --net ../trained_networks/run_1/best.backprop_net
     (perft -- move-generation speed/correctness check):
         ./chess_engine --perft 5
         ./chess_engine --perft 4 "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1"
     (self-test -- zobrist consistency + perft suite + quick self-game):
         ./chess_engine --selftest
+
+
+- How to compile and run the trainer (PST-distillation -> your .backprop_net):
+
+-- Compile (from chess/):
+        g++ -std=c++17 -DNDEBUG -O3 -pthread train.cpp -o chess_trainer
+
+-- Run:
+    train a fresh net (writes trained_networks/run_N/net.backprop_net + performance.txt):
+        ./chess_trainer SAMPLES=50000 EPOCHS=40 BATCH=32
+    resume/finetune an existing net (e.g. Lichess evals later):
+        ./chess_trainer CONTINUE=trained_networks/run_1/net.backprop_net EPOCHS=10 LR=0.0003
+    finetune on a Lichess-eval CSV dump (see howto/createAI.md for the format):
+        ./chess_trainer DATASET=dataset/200k_blitz_rapid_classical_bullet.csv ^
+                        CONTINUE=trained_networks/run_1/net.backprop_net ^
+                        SAMPLES=1000000 EPOCHS=8 LR=0.0005
+    sanity probes on a trained net (startpos ~ 0, queen-up positive, mirror flips sign):
+        ./chess_trainer --probe NET=trained_networks/run_1/net.backprop_net
+
+    Tunables: SAMPLES EPOCHS BATCH LR PATIENCE CLAMP SEED MIRROR CAPTURE_BIAS
+              MAX_PLIES DATASET SKIP_MATES OUT
+    Full list: ./chess_trainer --help   (see howto/createAI.md for the workflow)
+
+    (-DNDEBUG matters: it disables the Matrix bounds asserts in the hot training loops.)
+
+
+- How to compile and run the dataset-tools unit tests:
+
+-- Compile (from chess/):
+        g++ -std=c++17 -DNDEBUG -O2 test.cpp -o chess_test
+
+-- Run: ./chess_test     (must print ALL TESTS PASSED before you trust
+                         DATASET= training; covers CSV parsing, SAN replay,
+                         eval alignment, and mirror augmentation)
 
 
 - UCI mode: it speaks the standard UCI protocol on stdin/stdout.
@@ -27,7 +61,7 @@ $ > quit
 
     Other useful go forms:  go movetime 1000   (think exactly ~1s)
                             go wtime 300000 btime 300000   (real clocks, ms)
-    Load net at runtime:    setoption name EvalFile value path/to/net.simple_net
+    Load net at runtime:    setoption name EvalFile value path/to/net.backprop_net
     Show board + eval:      d
 
 

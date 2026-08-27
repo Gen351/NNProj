@@ -10,9 +10,9 @@ The engine is a **search** wrapped around **your network**:
             Searcher  <-- "if I play e2e4, then he plays g8f6, ..."
                  |          tries millions of move sequences (alpha-beta)
                  v
-           Evaluator  <-- scores ONE position with a single number
-                 |          (this is where YOUR net lives)
-        material+pst  OR   NetEvaluator(your .simple_net)
+        Evaluator  <-- scores ONE position with a single number
+                  |          (this is where YOUR net lives)
+        material+pst  OR   NetEvaluator(your .backprop_net)
 ```
 
 A common misconception to clear up first: **the neural network does NOT pick
@@ -79,8 +79,8 @@ Notes:
 Three ways, all equivalent:
 
 ```
-./chess_engine --net path/to/net.simple_net          # command line
-setoption name EvalFile value path/to/net.simple_net # inside UCI session
+./chess_engine --net path/to/net.backprop_net          # command line
+setoption name EvalFile value path/to/net.backprop_net # inside UCI session
 Engine::setEvaluator(loadNetEvaluator(path))         # from C++ code
 ```
 
@@ -90,9 +90,9 @@ an error explaining exactly what was wrong, e.g.:
 
 - `input size mismatch: expected 781 ... got N` -- fix your first layer.
 - `must end with a Dense layer producing exactly 1 output` -- add/fix the head.
-- File unreadable / bad format -- SimpleNetReader threw; check the path
-  (`SimpleNetReader::load` appends `.simple_net` itself when used internally;
-  here you give the full file name).
+- File unreadable / bad format -- BackpropNetReader threw; check the path
+  (`BackpropNetReader::load` appends `.backprop_net` itself when used
+  internally; here you give the full file name).
 
 ## What to train on
 
@@ -101,10 +101,25 @@ You do NOT need self-play games to start. Good escalating options:
 1. **Distill the built-in evaluator.** Generate random-ish positions, label
    each with the material+pst score, train your net to match. Cheap,
    supervised, and guarantees your net is at least PST-strength.
+   **The bundled trainer does this for you** -- see the next section.
 2. **Human/game database labels.** Lichess publishes its analysis database
    (Stockfish centipawn evaluations for millions of positions). Regress your
    net onto those evals -- this is classic supervised evaluation training and
-   much stronger than PST.
+   much stronger than PST. The trainer reads these dumps directly:
+
+   ```
+   ./chess_trainer DATASET=dataset/200k_blitz_rapid_classical_bullet.csv \
+                   CONTINUE=trained_networks/run_1/net.backprop_net \
+                   SAMPLES=1000000 EPOCHS=8 LR=0.0005
+   ```
+
+   Each row of the CSV is one game: SAN moves + White-POV centipawn evals per
+   ply ("#N" = mate scores, dropped by default via SKIP_MATES=1). The trainer
+   replays every game with its own move generator (see dataset_tools.h),
+   samples state/label pairs, mirrors each position for free symmetry data,
+   and randomly selects games across the WHOLE file so a SAMPLES cap stays
+   unbiased. Expect >99% of games to replay cleanly; anything that fails to
+   parse is dropped whole and counted in the load stats.
 3. **Self-play results.** Play your current net against the previous one with
    the engine's own search (short time controls), evolve weights the same way
    the snakes trainer does. Slow but closes the loop on "eval good == wins
@@ -112,14 +127,48 @@ You do NOT need self-play games to start. Good escalating options:
 
 Whatever the source, remember the target units are centipawns, White POV.
 
+## The bundled trainer (chess/train.cpp)
+
+`chess_trainer` distills the material+pst evaluator into a `BackpropNet::Net`
+end-to-end: it generates capture-biased random playouts, labels every position
+with the PST evaluator (plus a color-mirrored copy of each position), and
+trains with `BackpropNet::Net::train_v2` (Adam, minibatch SGD, per-epoch
+validation checkpoints, LR decay on plateau).
+
+```
+-- compile (from chess/):
+g++ -std=c++17 -DNDEBUG -O3 -pthread train.cpp -o chess_trainer
+
+-- train fresh (writes trained_networks/run_N/net.backprop_net):
+./chess_trainer SAMPLES=50000 EPOCHS=40 BATCH=32
+
+-- resume / finetune later (e.g. onto Lichess evals):
+./chess_trainer CONTINUE=trained_networks/run_1/net.backprop_net EPOCHS=10 LR=0.0003
+
+-- sanity probes (startpos ~ 0, queen-up positive, mirror flips sign):
+./chess_trainer --probe NET=trained_networks/run_1/net.backprop_net
+```
+
+Tunables (`KEY=VALUE`, see `./chess_trainer --help`): `SAMPLES EPOCHS BATCH
+LR PATIENCE CLAMP SEED MIRROR CAPTURE_BIAS MAX_PLIES OUT`.
+
+Notes:
+- Targets are clamped raw centipawns (`CLAMP`, default +-2500) so the net's
+  single output is directly usable as an evaluation, per the contract above.
+- The linear output head of `create_architecture()` in train.cpp is
+  deliberately initialized at centipawn scale; keep that property if you edit
+  the architecture or training will crawl while the head re-learns its scale.
+
 ## Testing ladder (do these in order)
 
 1. `./chess_engine --selftest` -- rules/zobrist/perft sanity (no net needed).
+2. `./chess_test` -- dataset-tools unit tests (CSV parsing, SAN replay,
+   eval alignment, mirror augmentation). Required before DATASET= training.
 2. Play vs the PST fallback: load your net, run
    `go movetime 200` twice from `position startpos` swapping sides, or just
    eyeball that it prefers reasonable developing/capturing moves at low depth.
-3. Sanity probes: feed positions via a small C++ test harness using
-   `getState()` + `net->predict()` directly:
+3. Sanity probes: `./chess_trainer --probe NET=path/to/net` (or a small C++
+   test harness using `getState()` + `net.predict()` directly):
    - startpos should evaluate near 0;
    - white up a queen should be strongly positive;
    - the mirror of a position should flip the sign (your net must understand
@@ -128,20 +177,21 @@ Whatever the source, remember the target units are centipawns, White POV.
    games alternating colors. If your net can't beat PST, keep training --
    don't tune the search.
 5. When it's strong: plug into a real GUI (any UCI app) via
-   `chess_engine --net your.net`, or an online bot bridge such as lichess-bot,
-   which talks UCI to this exact executable.
+   `chess_engine --net your.backprop_net`, or an online bot bridge such as
+   lichess-bot, which talks UCI to this exact executable.
 
 ## Quick reference for C++ side integration
 
 ```cpp
-#include "../nn_engine/simple_net/simple_net.h"
+#include "../nn_engine/backprop_net/backprop_net.h"
+#include "../nn_engine/backprop_net/backprop_net_reader.h"
 #include "chess_environment.h"
 #include "evaluator.h"
 
 ChessGame game;                                  // rules + state encoding
 game.setFen(chess::kStartFen);
 
-auto eval = chess::loadNetEvaluator("best.simple_net");  // throws w/ message
+auto eval = chess::loadNetEvaluator("best.backprop_net");  // throws w/ message
 std::vector<float> state;
 chess::getState(game.pos, state);                // the 781 floats
 // ... train / predict against `state`, target = centipawns (White POV)

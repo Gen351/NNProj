@@ -7,8 +7,8 @@
 //   MaterialPSTEvaluator -- classic handcrafted material + piece-square tables.
 //                           Default so the engine plays real chess before you
 //                           ever train anything.
-//   NetEvaluator         -- wraps YOUR SimpleNet (.simple_net file): the net's
-//                           single output is read directly as centipawns.
+//   NetEvaluator         -- wraps YOUR BackpropNet (.backprop_net file): the
+//                           net's single output is read directly as centipawns.
 //                           See howto/createAI.md for the exact IO contract.
 
 #include <algorithm>
@@ -19,9 +19,8 @@
 #include <string>
 #include <vector>
 
-#include "../nn_engine/simple_net/simple_net.h"
-#include "../nn_engine/simple_net/simple_layer.h"
-#include "../nn_engine/net_reader/simple_net_reader.h"
+#include "../nn_engine/backprop_net/backprop_net.h"
+#include "../nn_engine/backprop_net/backprop_net_reader.h"
 
 #include "./chess_environment.h"
 
@@ -128,12 +127,12 @@ private:
 // Your neural network as an evaluator. Contract (see howto/createAI.md):
 //   input  : exactly STATE_SIZE (781) floats from ChessGame getState()
 //   output : ONE value interpreted as centipawns, White's point of view.
-// A final Dense(1) layer WITHOUT activation acts as an affine scaler, so you
+// A final Dense layer WITHOUT activation acts as an affine scaler, so you
 // can end a TANH stack with e.g. weight 8000 / bias 0 to map [-1,1] -> cp.
 // ---------------------------------------------------------------------------
 class NetEvaluator final : public Evaluator {
 public:
-    explicit NetEvaluator(std::shared_ptr<SimpleNet> net, std::string source)
+    explicit NetEvaluator(std::shared_ptr<BackpropNet::Net> net, std::string source)
         : net_(std::move(net)), source_(std::move(source)) {
         validate();
         buf_.reserve(STATE_SIZE);
@@ -153,39 +152,43 @@ public:
 private:
     static constexpr float MAX_EVAL_CP = 29000.0f;
 
-    std::shared_ptr<SimpleNet> net_;
+    std::shared_ptr<BackpropNet::Net> net_;
     std::string source_;
     std::vector<float> buf_;
 
     void validate() const {
-        const SimpleLayer* first = nullptr;
+        const BackpropNet::DenseLayer* first = nullptr;
         for (const auto& l : net_->layers) {
-            first = dynamic_cast<const SimpleLayer*>(l.get());
-            if (first) break;
+            if (l->get_type() == "DEN") {
+                first = static_cast<const BackpropNet::DenseLayer*>(l.get());
+                break;
+            }
         }
         if (!first)
-            throw std::runtime_error("NetEvaluator: '" + source_ + "' has no Dense (LAY) layers");
+            throw std::runtime_error("NetEvaluator: '" + source_ + "' has no Dense (DEN) layers");
 
-        if (first->weights.cols() != STATE_SIZE)
+        if (first->get_weights().cols() != STATE_SIZE)
             throw std::runtime_error(
                 "NetEvaluator: '" + source_ + "' input size mismatch: expected " +
                 std::to_string(STATE_SIZE) + " (see howto/createAI.md), got " +
-                std::to_string(first->weights.cols()));
+                std::to_string(first->get_weights().cols()));
 
-        const SimpleLayer* last = nullptr;
+        const BackpropNet::DenseLayer* last = nullptr;
         for (auto it = net_->layers.rbegin(); it != net_->layers.rend(); ++it) {
-            last = dynamic_cast<const SimpleLayer*>(it->get());
-            if (last) break;
+            if ((*it)->get_type() == "DEN") {
+                last = static_cast<const BackpropNet::DenseLayer*>(it->get());
+                break;
+            }
         }
-        if (!last || last->weights.rows() != 1)
+        if (!last || last->get_biases().size() != 1)
             throw std::runtime_error("NetEvaluator: '" + source_ +
                                      "' must end with a Dense layer producing exactly 1 output");
     }
 };
 
-// Loads a .simple_net file and wraps it (throws on any validation failure).
+// Loads a .backprop_net file and wraps it (throws on any validation failure).
 inline std::shared_ptr<Evaluator> loadNetEvaluator(const std::string& path) {
-    auto net = std::make_shared<SimpleNet>(SimpleNetReader::load(path));
+    auto net = std::make_shared<BackpropNet::Net>(BackpropNetReader::load(path));
     return std::make_shared<NetEvaluator>(std::move(net), path);
 }
 

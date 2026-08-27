@@ -96,7 +96,7 @@ namespace zobrist {
     };
 
     // Zobrist piece index: white type t -> t-1 (0..5); black type t -> t+5 (6..11).
-    inline constexpr int pieceIndex(const int p) { return p > 0 ? p - 1 : p + 5; }
+    inline constexpr int pieceIndex(const int p) { return p > 0 ? p - 1 : -p + 5; }
 
     inline const Keys& keys() {
         static const Keys k;
@@ -691,18 +691,38 @@ inline bool parseUciMove(const std::string& str, const Position& p, Move& out) {
 inline std::string boardString(const Position& p) {
     static const char GLYPH[7] = {'?', 'P', 'N', 'B', 'R', 'Q', 'K'};
     std::string out = "  +------------------------+\n";
+    
     for (int r = 7; r >= 0; --r) {
         out += static_cast<char>('1' + r);
         out += " |";
+        
         for (int f = 0; f < 8; ++f) {
             const int pc = p.board[sqOf(f, r)];
-            char g = '.';
+            
+            // Checkerboard pattern logic
+            bool isLightSquare = (r + f) % 2 != 0;
+            
+            // 24-bit ANSI Background colors (Light Gray vs Dark Gray)
+            std::string bg = isLightSquare ? "\x1b[48;2;210;210;210m" 
+                                           : "\x1b[48;2;90;90;90m";
+            
+            char g = ' '; // Empty squares use space so the background color fills the block cleanly
+            std::string fg = "";
+            
             if (pc != EMPTY) {
                 g = GLYPH[pc > 0 ? pc : -pc];
-                if (pc < 0) g = static_cast<char>(g - 'A' + 'a');
+                if (pc < 0) {
+                    g = static_cast<char>(g - 'A' + 'a');
+                    // Black pieces: Solid black text
+                    fg = "\x1b[38;2;0;0;0m"; 
+                } else {
+                    // White pieces: Solid white text (with bold modifier)
+                    fg = "\x1b[38;2;255;255;255m\x1b[1m"; 
+                }
             }
-            out += ' ';
-            out += g;
+            
+            // Apply background, foreground, pad with space to match original spacing, add piece, then reset (\x1b[0m)
+            out += bg + fg + ' ' + g + "\x1b[0m";
         }
         out += " |\n";
     }
