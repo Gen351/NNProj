@@ -688,45 +688,159 @@ inline bool parseUciMove(const std::string& str, const Position& p, Move& out) {
 }
 
 // ASCII board for debugging / selftest output.
-inline std::string boardString(const Position& p) {
-    static const char GLYPH[7] = {'?', 'P', 'N', 'B', 'R', 'Q', 'K'};
-    std::string out = "  +------------------------+\n";
+#include <string>
+#include <cstdint>
+
+// 9x9 Pixel Art Piece Sprites: 0 = Transparent/BG, 1 = Dark Outline, 2 = Fill Color
+static const uint8_t PIECES[7][9][9] = {
+    // 0: EMPTY
+    {},
+    // 1: PAWN
+    {
+        {0,0,0,0,0,0,0,0,0},
+        {0,0,0,1,1,1,0,0,0},
+        {0,0,0,1,1,1,0,0,0},
+        {0,0,0,0,1,0,0,0,0},
+        {0,0,0,0,1,0,0,0,0},
+        {0,0,0,1,2,1,0,0,0},
+        {0,0,1,1,1,1,1,0,0},
+        {0,1,2,2,2,2,2,1,0},
+        {0,1,1,1,1,1,1,1,0}
+    },
+    // 2: KNIGHT
+    {
+        {0,0,0,0,0,0,0,0,0},
+        {0,0,0,1,1,1,1,0,0},
+        {0,0,1,2,2,2,1,0,0},
+        {0,1,2,2,2,2,1,0,0},
+        {0,1,1,2,1,2,1,0,0},
+        {0,0,0,1,2,2,1,0,0},
+        {0,0,1,1,1,1,1,1,0},
+        {0,1,2,2,2,2,2,1,0},
+        {0,1,1,1,1,1,1,1,0}
+    },
+    // 3: BISHOP
+    {
+        {0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,1,0,0,0,0},
+        {0,0,0,1,2,1,0,0,0},
+        {0,0,1,2,1,2,1,0,0},
+        {0,0,1,2,2,2,1,0,0},
+        {0,0,0,1,2,1,0,0,0},
+        {0,0,1,1,1,1,1,0,0},
+        {0,1,2,2,2,2,2,1,0},
+        {0,1,1,1,1,1,1,1,0}
+    },
+    // 4: ROOK
+    {
+        {0,0,0,0,0,0,0,0,0},
+        {0,1,0,1,0,1,0,1,0},
+        {0,1,2,1,2,1,2,1,0},
+        {0,1,1,1,1,1,1,1,0},
+        {0,0,1,2,2,2,1,0,0},
+        {0,0,1,2,2,2,1,0,0},
+        {0,1,1,1,1,1,1,1,0},
+        {0,1,2,2,2,2,2,1,0},
+        {0,1,1,1,1,1,1,1,0}
+    },
+    // 5: QUEEN
+    {
+        {0,1,0,1,0,1,0,1,0},
+        {0,1,2,1,2,1,2,1,0},
+        {0,1,1,1,1,1,1,1,0},
+        {0,0,1,2,2,2,1,0,0},
+        {0,0,0,1,2,1,0,0,0},
+        {0,0,0,1,2,1,0,0,0},
+        {0,0,1,1,1,1,1,0,0},
+        {0,1,1,2,2,2,1,1,0},
+        {0,1,1,1,1,1,1,1,0}
+    },
+    // 6: KING
+    {
+        {0,0,0,0,1,0,0,0,0},
+        {0,0,0,1,1,1,0,0,0},
+        {0,0,0,0,1,0,0,0,0},
+        {0,0,1,1,1,1,1,0,0},
+        {0,0,1,2,1,2,1,0,0},
+        {0,0,1,2,2,2,1,0,0},
+        {0,0,0,1,1,1,0,0,0},
+        {0,1,2,2,2,2,2,1,0},
+        {0,1,1,1,1,1,1,1,0}
+    }
+};
+
+// `from` / `to` (nullable square indexes) tint the moved-from and moved-to
+// squares with FROM_BG / TO_BG; passing nullptr keeps the plain colors.
+inline std::string boardString(const Position& p,
+                               const int* from = nullptr,
+                               const int* to = nullptr) {
+    std::string out = "";
     
+    // 24-bit RGB Color Palette
+    const std::string LIGHT_BG = "\x1b[48;2;235;237;240m"; // Light square
+    const std::string DARK_BG  = "\x1b[48;2;120;135;155m"; // Dark square
+    const std::string OUTLINE  = "\x1b[48;2;25;28;36m";   // Pixel outline
+    const std::string W_FILL   = "\x1b[48;2;255;255;255m"; // White piece fill
+    const std::string B_FILL   = "\x1b[48;2;55;62;78m";    // Black piece fill
+    const std::string FROM_BG  = "\x1b[48;2;76;175;80m";   // "from" square tint
+    const std::string TO_BG    = "\x1b[48;2;255;193;7m";   // "to" square tint
+    const std::string RESET    = "\x1b[0m";
+
     for (int r = 7; r >= 0; --r) {
-        out += static_cast<char>('1' + r);
-        out += " |";
-        
-        for (int f = 0; f < 8; ++f) {
-            const int pc = p.board[sqOf(f, r)];
+        // Each square is 11 terminal rows tall
+        for (int sy = 0; sy < 11; ++sy) {
             
-            // Checkerboard pattern logic
-            bool isLightSquare = (r + f) % 2 != 0;
-            
-            // 24-bit ANSI Background colors (Light Gray vs Dark Gray)
-            std::string bg = isLightSquare ? "\x1b[48;2;210;210;210m" 
-                                           : "\x1b[48;2;90;90;90m";
-            
-            char g = ' '; // Empty squares use space so the background color fills the block cleanly
-            std::string fg = "";
-            
-            if (pc != EMPTY) {
-                g = GLYPH[pc > 0 ? pc : -pc];
-                if (pc < 0) {
-                    g = static_cast<char>(g - 'A' + 'a');
-                    // Black pieces: Solid black text
-                    fg = "\x1b[38;2;0;0;0m"; 
-                } else {
-                    // White pieces: Solid white text (with bold modifier)
-                    fg = "\x1b[38;2;255;255;255m\x1b[1m"; 
+            // Vertically center rank numbers on row index 5
+            if (sy == 5) {
+                out += " " + std::to_string(r + 1) + " ";
+            } else {
+                out += "   ";
+            }
+
+            for (int f = 0; f < 8; ++f) {
+                const int sq = sqOf(f, r);
+                bool isLight = (r + f) % 2 != 0;
+                std::string sqBg = isLight ? LIGHT_BG : DARK_BG;
+                if (from && sq == *from) sqBg = FROM_BG;
+                else if (to && sq == *to) sqBg = TO_BG;
+                
+                int pc = p.board[sqOf(f, r)];
+                int pcType = (pc != EMPTY) ? (pc > 0 ? pc : -pc) : 0;
+                bool isWhite = pc > 0;
+
+                // Each square is 11 pixel blocks wide (22 terminal characters)
+                for (int sx = 0; sx < 11; ++sx) {
+                    
+                    // 1-pixel outer padding boundary / empty cell check
+                    if (sy == 0 || sy == 10 || sx == 0 || sx == 10 || pcType == 0) {
+                        out += sqBg + "  ";
+                    } else {
+                        // Read from 9x9 matrix offset by 1
+                        uint8_t pixel = PIECES[pcType][sy - 1][sx - 1];
+                        
+                        if (pixel == 0) {
+                            out += sqBg + "  ";
+                        } else if (pixel == 1) {
+                            out += OUTLINE + "  ";
+                        } else if (pixel == 2) {
+                            out += (isWhite ? W_FILL : B_FILL) + "  ";
+                        }
+                    }
                 }
             }
-            
-            // Apply background, foreground, pad with space to match original spacing, add piece, then reset (\x1b[0m)
-            out += bg + fg + ' ' + g + "\x1b[0m";
+            out += RESET + "\n";
         }
-        out += " |\n";
     }
-    out += "    a b c d e f g h\n";
+
+    // Horizontally center file coordinates below 22-char wide cells
+    out += "   ";
+    for (int f = 0; f < 8; ++f) {
+        out += "          ";
+        out += static_cast<char>('a' + f);
+        out += "           ";
+    }
+    out += "\n\n\n";
+
     return out;
 }
 

@@ -7,8 +7,15 @@
 //   MaterialPSTEvaluator -- classic handcrafted material + piece-square tables.
 //                           Default so the engine plays real chess before you
 //                           ever train anything.
-//   NetEvaluator         -- wraps YOUR BackpropNet (.backprop_net file): the
-//                           net's single output is read directly as centipawns.
+//   NetEvaluator         -- wraps YOUR BackpropNet (.backprop_net file). Two
+//                           output conventions are auto-detected:
+//                             * legacy: the net's single output IS the score
+//                               in centipawns directly;
+//                             * win-prob: a net whose final layer is a TANH
+//                               activation outputs a win-probability-ish value
+//                               y in (-1,1); it is inverted back to centipawns
+//                               via the same normalization the trainer used
+//                               (see cpWinProb/winProbToCp below).
 //                           See howto/createAI.md for the exact IO contract.
 
 #include <algorithm>
@@ -31,6 +38,41 @@ struct Evaluator {
     virtual float evaluate(const Position& p) = 0;
     virtual std::string name() const = 0;
 };
+
+// ---------------------------------------------------------------------------
+// Win-probability label normalization (the "Option C" training convention).
+//
+// Raw centipawn labels are squashed onto (-1,1) with tanh(cp/S) before
+// training. The net's final TANH activation layer outputs exactly this
+// (-1,1) value, so the MSE gradient stays well-scaled, while the unstable,
+// noisy centipawn tails of real datasets are compressed and the near-zero
+// opening density stays informative. The same scale S is shared between the
+// trainer (targets) and this evaluator (inversion), so no per-run knob can
+// drift them out of sync and backprop_net is never touched.
+//
+//   cpWinProb(cp)  -> tanh(cp / kWinScaleCP)        in (-1,1), antisymmetric
+//   winProbToCp(y) -> kWinScaleCP * atanh(y)        exact inverse within (-1,1)
+//
+// S=400 is chosen so a queen (900cp) maps to ~0.978, a +300cp edge to ~0.635
+// and +100cp to ~0.245: near 0 the map is roughly linear (~1:1), so opening
+// positions keep their ordering, while blowouts saturate instead of owning
+// the MSE gradient.
+// ---------------------------------------------------------------------------
+constexpr float kWinScaleCP = 400.0f;   // centipawn scale of the tanh map
+
+// Maps a centipawn score (already clamped to +-CLAMP) to the bounded (-1,1)
+// target the net's final TANH layer is trained against.
+inline float cpWinProb(const float cp) {
+    return std::tanh(cp / kWinScaleCP);
+}
+
+// Inverts a bounded net output y in (-1,1) back to centipawns. Clamps |y|
+// strictly below 1 so atanh stays finite even for a saturated net (tanh can
+// only reach +-1 => guard against NaN from an exact +-1 or a malformed net).
+inline float winProbToCp(const float y) {
+    const float c = std::clamp(y, -0.999999f, 0.999999f);
+    return kWinScaleCP * std::atanh(c);
+}
 
 // ---------------------------------------------------------------------------
 // Material + piece-square tables ("Simplified Evaluation Function" values).
@@ -126,8 +168,11 @@ private:
 // ---------------------------------------------------------------------------
 // Your neural network as an evaluator. Contract (see howto/createAI.md):
 //   input  : exactly STATE_SIZE (781) floats from ChessGame getState()
-//   output : ONE value interpreted as centipawns, White's point of view.
-// A final Dense layer WITHOUT activation acts as an affine scaler, so you
+//   output : ONE value. If the net's final layer is a TANH activation, that
+//            value is a bounded win-probability in (-kWinScaleCP,kWinScaleCP)
+//            and is inverted to centipawns; otherwise it is read directly as
+//            centipawns (legacy linear head). White's point of view.
+// A legacy Dense layer WITHOUT activation acts as an affine scaler, so you
 // can end a TANH stack with e.g. weight 8000 / bias 0 to map [-1,1] -> cp.
 // ---------------------------------------------------------------------------
 class NetEvaluator final : public Evaluator {
@@ -135,6 +180,7 @@ public:
     explicit NetEvaluator(std::shared_ptr<BackpropNet::Net> net, std::string source)
         : net_(std::move(net)), source_(std::move(source)) {
         validate();
+        winprob_ = hasTrailingTanh(*net_);
         buf_.reserve(STATE_SIZE);
     }
 
@@ -142,19 +188,35 @@ public:
         getState(p, buf_);
         const std::vector<float> out = net_->predict(buf_);
         if (out.empty()) return 0.0f;
-        const float v = out[0];
+        float v = out[0];
         if (!std::isfinite(v)) return 0.0f;   // guard NaN/inf nets
+        if (winprob_) v = winProbToCp(v);
         return std::clamp(v, -MAX_EVAL_CP, MAX_EVAL_CP);
     }
 
-    std::string name() const override { return "net:" + source_; }
+    std::string name() const override {
+        return "net:" + source_ + (winprob_ ? " (win-prob)" : " (linear)");
+    }
 
 private:
     static constexpr float MAX_EVAL_CP = 29000.0f;
 
     std::shared_ptr<BackpropNet::Net> net_;
     std::string source_;
+    bool winprob_ = false;
     std::vector<float> buf_;
+
+    // True if the net's final layer is a TANH activation (win-prob convention).
+    bool hasTrailingTanh(const BackpropNet::Net& net) const {
+        for (auto it = net_.get()->layers.rbegin(); it != net_.get()->layers.rend(); ++it) {
+            if ((*it)->get_type() == "DEN") break;     // weights come after activations
+            if ((*it)->get_type() == "ACT") {
+                const auto* a = static_cast<const BackpropNet::ActivationLayer*>(it->get());
+                return a->get_activation() == BackpropNet::ActivationLayer::TANH;
+            }
+        }
+        return false;
+    }
 
     void validate() const {
         const BackpropNet::DenseLayer* first = nullptr;

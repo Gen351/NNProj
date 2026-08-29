@@ -189,11 +189,15 @@ void runPerftCli(const std::string& fen, const int maxDepth) {
 // sharing hazard: NetEvaluator's internal state buffer is per-instance.
 // ---------------------------------------------------------------------------
 struct Engine {
+    chess::TranspositionTable tt;   // shared across primary + Lazy-SMP helpers
     chess::ChessGame game;
     std::shared_ptr<chess::Evaluator> evaluator = chess::makePstEvaluator();
     std::unique_ptr<chess::Searcher> searcher;
     std::thread worker;
     std::atomic<bool> searching{false};
+    std::atomic<bool> reporting{false};   // worker thread should emit bestmove
+
+    Engine() { tt.setSize(64); }
 
     // Helper-searcher machinery. evaluator_factory rebuilds a fresh,
     // self-contained Evaluator per helper (per-thread state buffers).
@@ -228,38 +232,58 @@ struct Engine {
         searching.store(false);
     }
 
-    void launch(chess::SearchLimits lim) {
-        joinSearch();
+    void startThreads(chess::SearchLimits lim, bool report) {
+        searcher = std::make_unique<chess::Searcher>(*evaluator, &tt);
+        if (report) {
+            searcher->onInfo = [](const chess::SearchInfo& i) {
+                std::ostringstream out;
+                out << "info depth " << i.depth << " score ";
+                if (i.mate) out << "mate " << i.mateIn;
+                else        out << "cp " << static_cast<long long>(i.scoreCp);
+                out << " nodes " << i.nodes << " time " << i.timeMs << " pv";
+                for (const chess::Move& m : i.pv) out << ' ' << chess::moveToUci(m);
+                std::cout << out.str() << std::endl;
+            };
+        }
 
-        searcher = std::make_unique<chess::Searcher>(*evaluator);
-        searcher->onInfo = [](const chess::SearchInfo& i) {
-            std::ostringstream out;
-            out << "info depth " << i.depth << " score ";
-            if (i.mate) out << "mate " << i.mateIn;
-            else        out << "cp " << static_cast<long long>(i.scoreCp);
-            out << " nodes " << i.nodes << " time " << i.timeMs << " pv";
-            for (const chess::Move& m : i.pv) out << ' ' << chess::moveToUci(m);
-            std::cout << out.str() << std::endl;
-        };
-
-        const int n = std::clamp(searchThreads, 1, 64);
-        for (int i = 1; i < n; ++i) {
-            auto ev = evaluatorFactory();
-            auto hs = std::make_unique<chess::Searcher>(*ev);
-            chess::Searcher* raw = hs.get();
-            helperEvaluators.push_back(std::move(ev));   // keeps *ev alive
-            helperSearchers.push_back(std::move(hs));
-            helpers.emplace_back([this, raw, lim] { raw->think(game, lim); });
+        if (report) {   // real searches spawn Lazy-SMP helpers; warm-up stays single-threaded
+            const int n = std::clamp(searchThreads, 1, 64);
+            for (int i = 1; i < n; ++i) {
+                auto ev = evaluatorFactory();
+                auto hs = std::make_unique<chess::Searcher>(*ev, &tt);
+                chess::Searcher* raw = hs.get();
+                helperEvaluators.push_back(std::move(ev));   // keeps *ev alive
+                helperSearchers.push_back(std::move(hs));
+                helpers.emplace_back([this, raw, lim] { raw->think(game, lim); });
+            }
         }
 
         searching.store(true);
+        reporting.store(report);
         worker = std::thread([this, lim] {
             const chess::SearchResult r = searcher->think(game, lim);
             stopHelpers();   // primary is done: release the helpers' cores now
-            std::cout << (r.hasMove ? "bestmove " + chess::moveToUci(r.best)
-                                    : "bestmove (none)") << std::endl;
+            if (reporting.load())
+                std::cout << (r.hasMove ? "bestmove " + chess::moveToUci(r.best)
+                                        : "bestmove (none)") << std::endl;
             searching.store(false);
         });
+    }
+
+    void launch(chess::SearchLimits lim) {
+        joinSearch();
+        startThreads(lim, true);
+    }
+
+    // Warm-up: silently search (no info/bestmove) on one thread up to a fixed
+    // depth so the shared TT holds useful entries when a real "go" arrives.
+    // joinSearch() aborts it before game / TT state is ever mutated.
+    void warmUp() {
+        joinSearch();
+        chess::SearchLimits inf;
+        inf.infinite = true;
+        inf.depthLimit = 9;
+        startThreads(inf, false);
     }
 };
 
@@ -320,6 +344,7 @@ int uciLoop(const std::string& startupNetPath) {
             std::cout << "id name " << kEngineName << ' ' << kEngineVersion << "\n"
                       << "id author NNProj\n"
                       << "option name EvalFile type string default\n"
+                      << "option name Hash type spin default 64 min 4 max 4096\n"
                       << "option name Threads type spin default " << eng.searchThreads
                       << " min 1 max 64\n"
                       << "uciok" << std::endl;
@@ -333,6 +358,13 @@ int uciLoop(const std::string& startupNetPath) {
             std::getline(in, value);
             if (!value.empty() && value.front() == ' ') value.erase(0, 1);
             if (name == "EvalFile" && !value.empty()) tryLoadNet(eng, value);
+            else if (name == "Hash") {
+                eng.joinSearch();   // don't free the table while searchers use it
+                try {
+                    eng.tt.setSize(static_cast<size_t>(std::clamp(std::stoi(value), 4, 4096)));
+                    std::cout << "info string Hash set to " << value << " MB" << std::endl;
+                } catch (...) { }
+            }
             else if (name == "Threads") {
                 try {
                     eng.searchThreads = std::clamp(std::stoi(value), 1, 64);
@@ -341,6 +373,7 @@ int uciLoop(const std::string& startupNetPath) {
             }
         } else if (cmd == "ucinewgame") {
             eng.joinSearch();
+            eng.tt.clear();
             eng.game.reset();
         } else if (cmd == "position") {
             eng.joinSearch();
@@ -369,6 +402,7 @@ int uciLoop(const std::string& startupNetPath) {
                                    << tok << std::endl;
                 }
             }
+            eng.warmUp();
         } else if (cmd == "go") {
             bool ponder = false;
             chess::SearchLimits saved;

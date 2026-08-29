@@ -1,0 +1,12 @@
+To get the win-prob improvement, the CONTINUE= source must itself be a TANH-head win-prob net. The cleanest way:
+
+1. First distill a fresh win-prob net:
+    ./chess_trainer SAMPLES=500000 EPOCHS=40 BATCH=40 OUT=trained_networks/new_architecture HIDDEN=256,32 LR=0.001 PATIENCE=6 SEED=24 MIRROR=1 THREADS=8
+
+    (no DATASET, no CONTINUE) → this creates a fresh TANH net trained on PST, then:
+
+2. Finetune it on the CSV:
+    ./chess_trainer SAMPLES=500000 EPOCHS=40 BATCH=40 OUT=trained_networks/new_architecture_dataset DATASET=dataset/200k_blitz_rapid_classical_bullet.csv CONTINUE=trained_networks/new_architecture/net HIDDEN=256,32 LR=0.001 PATIENCE=6 SEED=24 MIRROR=1 THREADS=8
+
+Verify after it finishes:
+    ./chess_trainer --probe NET=trained_networks/new_architecture_dataset/net

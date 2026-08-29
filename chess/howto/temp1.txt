@@ -1,0 +1,57 @@
+> how is stockfish so fast when it searches 30 depth?
+
+> Stockfish reaches a depth of 30 rapidly because it does not actually check every single legal move combination up to 30 plies. A true brute-force search at depth 30 would require evaluating more positions than atoms in the universe. [1] 
+Stockfish uses a selective search that slashes the number of evaluated branches using several core techniques: [2] 
+
+* Alpha-Beta Pruning: This algorithm skips entire branches of moves if it already found a move that is good enough, proving that the opponent would just refute or avoid that line. [3] 
+* Smart Move Ordering: Alpha-beta pruning only works well if you test the best moves first. Stockfish uses history heuristics, killer moves, and results from previous shallower searches (iterative deepening) to sort promising moves to the front, maximizing how many bad branches get ignored. [3, 4, 5, 6] 
+* Late Move Reductions (LMR) and Pruning: Moves that look unpromising or happen late in the move list are searched much more shallowly or skipped entirely, on the statistical bet that they won't change the outcome. [7] 
+* Fast Neural Network Evaluation (NNUE): Stockfish evaluates static board states using [NNUE](https://official-stockfish.github.io/docs/stockfish-wiki/Stockfish-FAQ.html) (Efficiently Updatable Neural Network), which calculates scores instantly without heavy computational lag. [8] 
+* Transposition Tables: Stockfish saves previously analyzed positions in a massive hash table so it never wastes time recalculating identical board layouts reached through different move orders. [8] 
+
+Because of these optimizations, a reported depth of 30 means the engine went at least 30 plies deep down its main line, while most uninteresting sidelines were cut off much earlier. [2] 
+If you'd like to explore further, let me know if you want to dive into:
+
+* How NNUE works compared to old-school evaluation points
+* The mechanics of alpha-beta cutoffs
+
+
+[1] [https://official-stockfish.github.io](https://official-stockfish.github.io/docs/stockfish-wiki/Stockfish-FAQ.html)
+[2] [https://www.chessonyx.com](https://www.chessonyx.com/articles/understanding-stockfish-depth)
+[3] [https://blogs.cornell.edu](https://blogs.cornell.edu/info2040/2022/09/30/game-theory-how-stockfish-mastered-chess/)
+[4] [https://www.youtube.com](https://www.youtube.com/watch?v=zj3WsRyjkYM&t=216)
+[5] [https://blogdungaucher.com](https://blogdungaucher.com/en/blog/minimax-in-chess/)
+[6] [https://www.youtube.com](https://www.youtube.com/watch?v=JZOo1GuwVro&t=463)
+[7] [https://official-stockfish.github.io](https://official-stockfish.github.io/docs/stockfish-wiki/Terminology.html)
+[8] [https://www.facebook.com](https://www.facebook.com/aripal/photos/how-stockfish-plays-chess-so-wellstockfish-does-not-use-machine-learning-or-neur/10164325858692593/)
+
+
+> is NNUE just inference? like a basic neural net?
+
+> Yes, NNUE is strictly inference during game play. It does not learn or train while you play.
+However, it is not a "basic" neural network in the traditional computer vision sense. It is a highly specialized architecture designed to run at lightning speed on standard computer processors (CPUs) without needing a graphics card (GPU).
+Here is what makes NNUE unique compared to standard neural networks:
+## 1. It is "Efficiently Updatable"
+In a normal neural network, if one chess piece moves, the computer has to recalculate the entire network from scratch.
+
+* The NNUE Trick: It exploits the fact that a chess move only changes two squares on the board (the starting square and the destination square).
+* The Difference: Instead of recalculating all inputs, NNUE mathematically subtracts the piece from its old square and adds it to the new square. This "incremental update" makes it thousands of times faster than standard inference.
+
+## 2. It is Shallowed and Quantized
+Standard AI models (like ChatGPT or Leela Chess Zero) use deep networks with millions of parameters that require heavy GPU power.
+
+* NNUE Architecture: It is a shallow, sparsely connected network (usually just 4 layers).
+* Quantization: The network does not use complex decimal numbers (floating-point numbers). It uses integers (whole numbers). CPUs can process integer math instantly using SIMD (Single Instruction, Multiple Data) instruction sets like AVX2 or AVX-512.
+
+## 3. It Replaced Human Formulas, Not the Search
+In old engines, human grandmasters wrote formulas to score positions (e.g., +1.0 for a pawn, +0.5 for an open file).
+
+* The Shift: NNUE simply replaces that human-written scoring formula.
+* The Result: Stockfish still uses its classic, ultra-fast alpha-beta search algorithm, but it uses the NNUE network as a super-accurate digital referee to grade the positions at the end of the lines.
+
+If you are interested in the technical side, let me know if you want to look at:
+
+* The network structure (like the SFNN architectures)
+* How SIMD assembly instructions make it run so fast
+
+

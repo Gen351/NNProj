@@ -113,19 +113,22 @@ You do NOT need self-play games to start. Good escalating options:
                    SAMPLES=1000000 EPOCHS=8 LR=0.0005
    ```
 
-   Each row of the CSV is one game: SAN moves + White-POV centipawn evals per
-   ply ("#N" = mate scores, dropped by default via SKIP_MATES=1). The trainer
-   replays every game with its own move generator (see dataset_tools.h),
-   samples state/label pairs, mirrors each position for free symmetry data,
-   and randomly selects games across the WHOLE file so a SAMPLES cap stays
-   unbiased. Expect >99% of games to replay cleanly; anything that fails to
-   parse is dropped whole and counted in the load stats.
+   Each row of the CSV is one game: SAN moves + White-POV evals per ply. The
+   CSV stores evals in **PAWNS** (e.g. `0.25` = +25cp; `"#N"` = mate scores,
+   dropped by default via SKIP_MATES=1); the trainer multiplies by 100 to get
+   centipawns at load time. It replays every game with its own move generator
+   (see dataset_tools.h), samples state/label pairs, mirrors each position for
+   free symmetry data, and randomly selects games across the WHOLE file so a
+   SAMPLES cap stays unbiased. Expect >99% of games to replay cleanly; anything
+   that fails to parse is dropped whole and counted in the load stats.
 3. **Self-play results.** Play your current net against the previous one with
    the engine's own search (short time controls), evolve weights the same way
    the snakes trainer does. Slow but closes the loop on "eval good == wins
    games".
 
-Whatever the source, remember the target units are centipawns, White POV.
+Whatever the source, remember the engine/evaluator contract is scores in
+centipawns, White POV. See "Label normalization" below -- the trainer does NOT
+regress raw centipawns anymore.
 
 ## The bundled trainer (chess/train.cpp)
 
@@ -150,14 +153,38 @@ g++ -std=c++17 -DNDEBUG -O3 -pthread train.cpp -o chess_trainer
 ```
 
 Tunables (`KEY=VALUE`, see `./chess_trainer --help`): `SAMPLES EPOCHS BATCH
-LR PATIENCE CLAMP SEED MIRROR CAPTURE_BIAS MAX_PLIES OUT`.
+LR PATIENCE CLAMP PST_SCALE SEED MIRROR CAPTURE_BIAS MAX_PLIES OUT`.
 
-Notes:
-- Targets are clamped raw centipawns (`CLAMP`, default +-2500) so the net's
-  single output is directly usable as an evaluation, per the contract above.
-- The linear output head of `create_architecture()` in train.cpp is
-  deliberately initialized at centipawn scale; keep that property if you edit
-  the architecture or training will crawl while the head re-learns its scale.
+## Label normalization (win-probability targets)
+
+The trainer no longer regresses raw centipawns. Instead targets go through
+`tanh(cp / S)` with `S = 400` (see `cpWinProb()`/`winProbToCp()` in
+`evaluator.h`):
+
+- Labels are clamped to `+-CLAMP` (default 2500) centipawns, then squashed to
+  `(-1, 1)` with tanh. Near 0 the map is ~1:1, so opening positions keep their
+  ordering; the noisy, heavy tails of real datasets (Stockfish evals run 2-4x
+  hotter than material/PST) saturate instead of owning the MSE gradient.
+- **The net's architecture ends with a TANH activation** (the output head is
+  `Dense -> TANH`), so its output natively matches the `(-1,1)` target scale
+  and the MSE gradient stays well-scaled for every sample. Without this, raw-MSE
+  training regresses the whole net toward ~0 (predicting "draw" everywhere),
+  which shows up as a stalled plateau and timid shuffle-draw play.
+- At eval time `NetEvaluator` auto-detects the trailing TANH and inverts the
+  bounded output back to centipawns via `S * atanh(y)`, so the engine/search
+  still sees a normal centipawn score. Legacy linear-head nets are still
+  detected and evaluated as raw centipawns (no retraining on them needed).
+- Because targets are bounded, `Val MSE` is reported in win-prob units
+  (expect ~0.01-0.05 after a good fit -- NOT comparable to the old raw-cp MSE).
+- `CLAMP` bounds inputs; `PST_SCALE` (PST mode only) multiplies the teacher's
+  centipawns by 1.5-2.0 before the tanh transform to approximate the hotter
+  Stockfish magnitudes on the eval CSV -- the magnitude gap between material/PST
+  and a good engine is nonlinear (largest near 0).
+
+`create_architecture()` seeds the final head weights small (`+-0.5`) so the
+pre-activation starts near 0 and the final tanh begins in its sensitive region;
+keep that property if you edit the architecture or the head starts saturated
+and training stalls at epoch 0.
 
 ## Testing ladder (do these in order)
 

@@ -16,6 +16,13 @@
 //                              mates for Black)
 //   [5] mirror_position     -- color/square flip is an involution and flips
 //                              the side to move
+//   [6] win-prob normalizer  -- cpWinProb/winProbToCp round-trip, antisymmetry,
+//                              monotonicity and saturation-safety; a TANH-head
+//                              net survives save/load and auto-inverts at eval
+//   [7] transposition table   -- move packing round-trip, EXACT probe, same-slot
+//                              miss (full 64-bit key), deeper same-gen
+//                              replacement, stale-gen replacement, ply-normalized
+//                              mate scores, eval-field round-trip
 //
 // Compile (from chess/):
 //   g++ -std=c++17 -DNDEBUG -O2 test.cpp -o chess_test
@@ -23,6 +30,7 @@
 //   ./chess_test
 
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -30,6 +38,8 @@
 #include "./chess_environment.h"
 #include "./evaluator.h"
 #include "./dataset_tools.h"
+#include "./search.h"
+#include "./transposition_table.h"
 
 namespace {
 
@@ -233,6 +243,135 @@ void test_mirror() {
           "teacher score anti-symmetric under mirroring (label flip is sound)");
 }
 
+void test_winprob() {
+    std::cout << "[6] win-prob normalization + TANH-head eval\n";
+
+    // Round-trip: winProbToCp(cpWinProb(cp)) ~= cp across magnitude buckets.
+    bool rt = true;
+    for (const float cp : {0.0f, 25.0f, 100.0f, 400.0f, 900.0f, 1500.0f, 2500.0f}) {
+        const float back = chess::winProbToCp(chess::cpWinProb(cp));
+        rt = rt && std::fabs(back - cp) < 1.0f;
+    }
+    check(rt, "winProbToCp(cpWinProb(cp)) ~= cp at 0/25/100/400/900/1500/2500 cp");
+
+    // Antisymmetry: f(-x) == -f(x) for both maps.
+    check(std::fabs(chess::cpWinProb(-300.0f) + chess::cpWinProb(300.0f)) < 1e-3f,
+          "cpWinProb is antisymmetric");
+    check(std::fabs(chess::winProbToCp(-200.0f) + chess::winProbToCp(200.0f)) < 1e-3f,
+          "winProbToCp is antisymmetric");
+
+    // Monotonic non-decreasing over the whole practical range.
+    bool mono = true;
+    float prev = -1e9f;
+    for (int i = -60; i <= 60; ++i) {
+        const float y = chess::cpWinProb(static_cast<float>(i) * 50.0f);
+        if (y < prev) mono = false;
+        prev = y;
+    }
+    check(mono, "cpWinProb monotonic non-decreasing from -3000 to +3000 cp");
+
+    // Saturation safety: even a fully saturated net (y == 1, the max tanh can
+    // reach) inverts to a finite, bounded centipawn score -- never NaN/Inf.
+    const float big = chess::winProbToCp(1.0f);
+    check(std::isfinite(big) && big > 2500.0f && big < 3000.0f,
+          "saturated net output inverts to finite ~2900cp, not inf/NaN");
+
+    // Scale sanity: a +100cp edge maps to a clearly separated target.
+    const float y100 = chess::cpWinProb(100.0f);
+    check(y100 > 0.15f && y100 < 0.35f,
+          "cpWinProb(+100cp) in (0.15, 0.35) so mild edges stay informative");
+
+    // A TANH-head net must survive save/load and auto-invert to centipawns.
+    BackpropNet::Net net;
+    net.add_layer(std::make_unique<BackpropNet::DenseLayer>(
+        chess::STATE_SIZE, 1, BackpropNet::DenseLayer::InitType::XAVIER));
+    net.add_layer(std::make_unique<BackpropNet::ActivationLayer>(BackpropNet::ActivationLayer::TANH));
+    const std::string tmp = "test_winprob_tmp";
+    const std::string tmpPath = tmp + ".backprop_net";   // save/load append this
+    std::remove(tmpPath.c_str());                        // drop any stale copy first
+    BackpropNetReader::save(tmp, net);
+    auto loaded = BackpropNetReader::load(tmp);
+    std::remove(tmpPath.c_str());                        // unlink may transiently fail on Windows; harmless
+
+    auto loaded_shared = std::make_shared<BackpropNet::Net>(std::move(loaded));
+    chess::NetEvaluator ne(loaded_shared, "mem");
+    check(ne.name().find("win-prob") != std::string::npos,
+          "TANH-head net reports win-prob convention after save/load");
+
+    // Search-visible contract: pin the head bias so the net outputs y=0.5
+    // (a ~+220cp win-prob); NetEvaluator must invert that back to a bounded,
+    // clearly positive centipawn score rather than a raw 0.5.
+    auto& head_w = static_cast<BackpropNet::DenseLayer&>(*loaded_shared->layers.front());
+    head_w.get_biases()[0] = static_cast<float>(std::atanh(0.5));  // => tanh(..)=0.5
+    head_w.get_weights().data.assign(head_w.get_weights().data.size(), 0.0f);  // kill input rx
+    chess::ChessGame start;
+    const float pin_ep = ne.evaluate(start.pos);
+    check(pin_ep > 150.0f && pin_ep < 300.0f && std::isfinite(pin_ep),
+          "net pinned at y=0.5 evaluates to bounded ~+220 cp (not +0.5 raw)");
+}
+
+void test_transposition_table() {
+    std::cout << "[7] transposition table\n";
+
+    using TT = chess::TranspositionTable;
+    TT tt;
+    tt.setSize(4);   // keep it small; slot count stays a power of two
+
+    // Move packing round-trips all four fields losslessly (incl. flags|promo).
+    chess::Move m;
+    m.from = chess::sqOf(0, 1);                      // a2
+    m.to = chess::sqOf(0, 3);                        // a4
+    m.promo = chess::QUEEN;
+    m.flags = chess::F_DOUBLE | chess::F_EP;
+    const chess::Move back = TT::unpackMove(TT::packMove(m));
+    check(back.from == m.from && back.to == m.to && back.promo == m.promo
+              && back.flags == m.flags,
+          "packMove/unpackMove round-trips from/to/promo/flags losslessly");
+
+    // EXACT store/probe round-trips score, best move, depth and bound.
+    const uint64_t keyA = chess::computeHash(chess::ChessGame().pos) ^ 0x9E3779B97F4A7C15ULL;
+    tt.store(keyA, 123, TT::EVAL_NONE, TT::packMove(m), 3, TT::BOUND_EXACT);
+    TT::TTEntry out;
+    check(tt.probe(keyA, out) && out.score == 123 && out.move == TT::packMove(m)
+              && out.depth == 3 && out.flag == TT::BOUND_EXACT,
+          "EXACT store/probe round-trips score, move, depth, bound");
+
+    // Same slot, different full 64-bit key -> miss (collision-free probing).
+    const uint64_t keyB = keyA + tt.numEntries();   // keyB & mask == keyA & mask
+    check(!tt.probe(keyB, out), "different full key in same slot is a miss");
+
+    // Depth-preferred replacement within one search: a deeper same-generation
+    // entry survives a shallower store targeting the same slot.
+    tt.store(keyB, 456, TT::EVAL_NONE, 0, 7, TT::BOUND_LOWER);
+    tt.store(keyA, 789, TT::EVAL_NONE, 0, 1, TT::BOUND_LOWER);
+    check(tt.probe(keyB, out) && out.score == 456 && out.depth == 7,
+          "deeper same-gen entry is kept over a shallower replacement");
+
+    // Starting a fresh search makes the deeper entry stale and thus
+    // replaceable by anything new, even at shallower depth.
+    tt.newSearch();
+    tt.store(keyA, 111, TT::EVAL_NONE, 0, 1, TT::BOUND_UPPER);
+    check(tt.probe(keyA, out) && out.score == 111 && out.flag == TT::BOUND_UPPER
+              && !tt.probe(keyB, out),
+          "newSearch makes stale entries replaceable (deeper old entry gone)");
+
+    // Mate scores are ply-normalized on store and read back from the node's
+    // perspective: MATE_SCORE-3 stored at ply 5 reads as MATE_SCORE-7 at ply 9.
+    check(chess::ttReadScore(chess::ttStoreScore(chess::MATE_SCORE - 3, 5), 9)
+              == chess::MATE_SCORE - 7,
+          "mate distance normalized (store ply5/read ply9 -> MATE_SCORE-7)");
+    check(chess::ttReadScore(chess::ttStoreScore(145.5f, 5), 9) == 145.0f,
+          "non-mate score passes through unchanged (truncated to int)");
+
+    // Static-eval field round-trips, and reads back EVAL_NONE when unset.
+    tt.store(keyA, 200, TT::EVAL_NONE, 0, 2, TT::BOUND_EXACT);
+    check(tt.probe(keyA, out) && out.eval == TT::EVAL_NONE,
+          "eval field reads back EVAL_NONE when nothing was stored");
+    tt.store(keyA, 200, 137, 0, 2, TT::BOUND_EXACT);
+    check(tt.probe(keyA, out) && out.eval == 137,
+          "eval field round-trips a stored static evaluation");
+}
+
 }   // namespace
 
 int main() {
@@ -242,6 +381,8 @@ int main() {
     test_san_edges();
     test_eval_alignment();
     test_mirror();
+    test_winprob();
+    test_transposition_table();
 
     std::cout << "=============================\n"
               << (g_failures == 0 ? "ALL TESTS PASSED\n" : "TESTS FAILED\n");

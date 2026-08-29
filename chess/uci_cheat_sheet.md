@@ -28,8 +28,9 @@ Commands used by chess GUIs (e.g., Lichess-Bot, Arena, Cutechess) to handshake a
 | `uci` | Requests engine identification and available custom parameters. | `id name NNProj Chess 0.1` ... `uciok` |
 | `isready` | Synchronizes engine readiness (waits for background threads to finish loading). | `readyok` |
 | `setoption name EvalFile value <path>` | Dynamically loads a new neural network model path during run-time. | `info string loaded eval: NetEvaluator` |
-| `setoption name Threads value <N>` | Sets the number of search threads (Lazy-SMP concurrency). | `info string Threads set to 8` |
-| `ucinewgame` | Clears search trees and resets internal state for a new game session. | *(No output expected)* |
+| `setoption name Threads value <N>` | Sets the number of search threads (Lazy-SMP concurrency, all sharing one transposition table). | `info string Threads set to 8` |
+| `setoption name Hash value <MB>` | Resizes the shared transposition table (default 64 MB, range 4-4096). Clears its contents. | `info string Hash set to 128 MB` |
+| `ucinewgame` | Clears the transposition table and resets internal state for a new game session. | *(No output expected)* |
 | `quit` | Stops all active background thread pools and exits the program cleanly. | *(Exits program)* |
 
 ---
@@ -114,11 +115,15 @@ Below is a trace of a complete interaction sequence for playing a move:
 <<< id name NNProj Chess 0.1
 <<< id author NNProj
 <<< option name EvalFile type string default
+<<< option name Hash type spin default 64 min 4 max 4096
 <<< option name Threads type spin default 6 min 1 max 64
 <<< uciok
 
 >>> setoption name EvalFile value models/v1.backprop_net
 <<< info string loaded eval: NetEvaluator (models/v1.backprop_net)
+
+>>> setoption name Hash value 128
+<<< info string Hash set to 128 MB
 
 >>> isready
 <<< readyok

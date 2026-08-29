@@ -45,3 +45,4 @@
 
 ## 6. Chess Engine (Minimax + NNUE):
 	- Use a TUI/Ncurses interface. Evaluate board positions with an efficient neural network architecture trained on raw board state matrices.
+		- Implement NNUE for faster inference

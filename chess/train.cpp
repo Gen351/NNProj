@@ -37,6 +37,7 @@ struct Config {
     unsigned threads = 0;
     std::string dataset_path;
     int skip_mates = 1;
+    float pst_scale = 1.0f;
     std::string out_dir;
     std::string continue_path;
     std::string net_path;
@@ -59,7 +60,7 @@ void print_usage() {
         << "  chess_trainer                        train a fresh net (PST distillation)\n"
         << "  chess_trainer DATASET=file.csv       finetune on a Lichess-eval CSV dump\n"
         << "  chess_trainer CONTINUE=path/net      resume/finetune an existing net\n"
-        << "  chess_trainer --probe NET=path/net   sanity probes on a trained net\n\n"
+        << "  chess_trainer --probe NET=path/net   sanity probes on a trained net\n\n"  
         << "Options (KEY=VALUE):\n"
         << "  SAMPLES=50000      positions generated (mirror pairs count twice)\n"
         << "  HIDDEN=512,64      hidden layer widths: Dense(781->h1)->TANH->...->Dense(->1)\n"
@@ -71,6 +72,9 @@ void print_usage() {
         << "  WEIGHT_DECAY=0.001 L2 weight decay applied after each epoch\n"
         << "  PATIENCE=5         epochs without val improvement before LR decay\n"
         << "  CLAMP=2500         labels clamped to +/-CLAMP centipawns\n"
+        << "  PST_SCALE=1.0      multiply PST-teacher labels by this before the win-prob\n"
+        << "                     transform (PST mode only; 1.5-2.0 approximates the\n"
+        << "                     stockfish-hot magnitudes on the eval CSV, default 1.0)\n"
         << "  SEED=42            rng seed for generation and shuffling\n"
         << "  MIRROR=1           add a color-flipped mirror of every position\n"
         << "  CAPTURE_BIAS=0.35  chance a playout picks a capture/promotion\n"
@@ -79,6 +83,10 @@ void print_usage() {
         << "                     instead of PST generation (pairs well with CONTINUE=)\n"
         << "  SKIP_MATES=1       drop '#N' mate-scored plies from DATASET samples\n"
         << "  OUT=path           output dir (default: trained_networks/run_N)\n"
+        << "\nLabel convention: targets are win-probability values tanh(cp/S), S=400,\n"
+        << "(see evaluator.h). The net's final TANH activation outputs these and\n"
+        << "NetEvaluator inverts them back to centipawns automatically. Val MSE is\n"
+        << "therefore reported in win-prob units (~0.01-0.05 after a good fit), not cp.\n"
         << "\nOutput: OUT/net.backprop_net, OUT/performance.txt\n"
         << "Play:   ./chess_engine --net trained_networks/run_N/net.backprop_net\n";
 }
@@ -109,7 +117,7 @@ unsigned resolve_threads(const Config& cfg) {
 std::string describe_architecture(const std::vector<size_t>& hidden) {
     std::string s = "781";
     for (const size_t h : hidden) s += " -> " + std::to_string(h) + " TANH";
-    s += " -> 1 (linear head)";
+    s += " -> 1 -> TANH (win-prob head)";
     return s;
 }
 
@@ -125,19 +133,26 @@ BackpropNet::Net create_architecture(const std::vector<size_t>& hidden, const fl
         prev = h;
     }
 
-    // The linear output head is initialized at centipawn scale (TANH features
-    // live in [-1,1]); without this the first epochs are spent merely growing
-    // the head's magnitude instead of learning evaluation.
-    // clamp_cp/32 keeps initial outputs moderate (~+-78 cp) so Adam can
-    // find its footing before the head grows.
+    // Win-probability head: Dense -> TANH. The Dense maps the hidden TANH
+    // features to a single pre-activation; the final TANH bounds it to
+    // (-1,1), which NetEvaluator scales by kWinScaleCP and inverts back to
+    // centipawns. Crucially, the final TANH's 1-cosh^-2 "squashing" kills the
+    // gradient for positions where the head is already confident -- exactly
+    // the noisy tail that made raw-MSE training regress everything to ~0.
+    //
+    // Seed the head weights small so the pre-activation starts near 0 and
+    // tanh maps it into the sensitive (roughly linear) part of its curve;
+    // initializing it to centipawn-scale magnitudes would put the final tanh
+    // deep in its saturated flat region and stall learning at epoch 0.
     auto head = std::make_unique<DenseLayer>(prev, 1, DenseLayer::InitType::XAVIER);
-
-    
     std::mt19937 rng(1234);
-    std::uniform_real_distribution<float> dist(-clamp_cp / 32.0f, clamp_cp / 32.0f);
+    std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
     for (float& w : head->get_weights().data) w = dist(rng);
     head->get_biases()[0] = 0.0f;
     net.add_layer(std::move(head));
+    
+    // Add TANH for win prob (-1, 1), -1 for black, 1 for white
+    net.add_layer(std::make_unique<ActivationLayer>(ActivationLayer::TANH));
     return net;
 }
 
@@ -150,8 +165,23 @@ std::string describe_dims(const std::vector<std::pair<size_t, size_t>>& dims) {
     return s;
 }
 
-BackpropNet::Net load_net(const std::string& path, const std::vector<size_t>& hidden) {
+BackpropNet::Net load_net(const std::string& path, const std::vector<size_t>& hidden,
+                          bool& out_winprob) {
     BackpropNet::Net net = BackpropNetReader::load(path);
+
+    // Win-prob convention: the net was trained against bounded S*tanh(cp/S)
+    // targets iff its final layer is a TANH activation. This drives how the
+    // training targets must be encoded below (fresh checkerboards always use
+    // win-prob, but an old linear-head checkpoint must keep raw-cp targets).
+    out_winprob = false;
+    for (auto it = net.layers.rbegin(); it != net.layers.rend(); ++it) {
+        if ((*it)->get_type() == "DEN") break;
+        if ((*it)->get_type() == "ACT") {
+            const auto* a = static_cast<const BackpropNet::ActivationLayer*>(it->get());
+            out_winprob = (a->get_activation() == BackpropNet::ActivationLayer::TANH);
+            break;
+        }
+    }
 
     // Full shape check against the architecture we intend to train: every
     // DEN layer's dims must match [781, h0..hn, 1] in order. This catches
@@ -226,7 +256,8 @@ void trim_to_budget(Dataset& train, const Dataset& val, const size_t samples) {
 // budget is checked at game granularity -- a thread can overshoot by at most
 // one game (~2*MAX_PLIES samples), which trim_to_budget() removes afterwards.
 // ---------------------------------------------------------------------------
-void generate_dataset(Dataset& train, Dataset& val, const Config& config, const unsigned nthreads) {
+void generate_dataset(Dataset& train, Dataset& val, const Config& config,
+                      const bool winprob, const unsigned nthreads) {
     std::atomic<size_t> made{0};
     std::atomic<bool> val_assigned{false};
     std::mutex merge_mutex;
@@ -251,18 +282,20 @@ void generate_dataset(Dataset& train, Dataset& val, const Config& config, const 
                 if (game.status().result != chess::ONGOING) break;
 
                 const float cp = teacher.evaluate(game.pos);
+                const float c = std::clamp(cp * config.pst_scale, -config.clamp_cp, config.clamp_cp);
 
                 state.clear();
                 chess::getState(game.pos, state);
                 local.inputs.push_back(state);
-                local.targets.push_back({std::clamp(cp, -config.clamp_cp, config.clamp_cp)});
+                local.targets.push_back({winprob ? chess::cpWinProb(c) : c});
 
                 if (config.mirror) {
                     const chess::Position mirrored = mirror_position(game.pos);
                     state.clear();
                     chess::getState(mirrored, state);
+                    const float mc = std::clamp(-cp * config.pst_scale, -config.clamp_cp, config.clamp_cp);
                     local.inputs.push_back(state);
-                    local.targets.push_back({std::clamp(-cp, -config.clamp_cp, config.clamp_cp)});
+                    local.targets.push_back({winprob ? chess::cpWinProb(mc) : mc});
                 }
 
                 game.make(pick_move(game.pos, moves, config.capture_bias, rng));
@@ -338,6 +371,7 @@ struct CsvLoadStats {
 void generate_dataset_csv(Dataset& train,
                           Dataset& val,
                           const Config& cfg,
+                          bool winprob,
                           CsvLoadStats& stats,
                           const unsigned nthreads) {
     std::ifstream file(cfg.dataset_path);
@@ -381,7 +415,8 @@ void generate_dataset_csv(Dataset& train,
             state.clear();
             chess::getState(p, state);
             local.inputs.push_back(std::move(state));
-            local.targets.push_back({std::clamp(cp, -cfg.clamp_cp, cfg.clamp_cp)});
+            const float c = std::clamp(cp, -cfg.clamp_cp, cfg.clamp_cp);
+            local.targets.push_back({winprob ? chess::cpWinProb(c) : c});
             ++lst.samples;
 
             if (cfg.mirror) {
@@ -389,7 +424,8 @@ void generate_dataset_csv(Dataset& train,
                 state.clear();
                 chess::getState(mirrored, state);
                 local.inputs.push_back(std::move(state));
-                local.targets.push_back({std::clamp(-cp, -cfg.clamp_cp, cfg.clamp_cp)});
+                const float mc = std::clamp(-cp, -cfg.clamp_cp, cfg.clamp_cp);
+                local.targets.push_back({winprob ? chess::cpWinProb(mc) : mc});
                 ++lst.samples;
             }
         };
@@ -579,6 +615,7 @@ Config parse_args(int argc, char** argv) {
         else if (key == "WEIGHT_DECAY") config.weight_decay = std::stof(val);
         else if (key == "PATIENCE")     config.patience = std::stoull(val);
         else if (key == "CLAMP")        config.clamp_cp = std::stof(val);
+        else if (key == "PST_SCALE")    config.pst_scale = std::stof(val);
         else if (key == "SEED")         config.seed = static_cast<unsigned>(std::stoul(val));
         else if (key == "MIRROR")       config.mirror = std::stoi(val);
         else if (key == "CAPTURE_BIAS") config.capture_bias = std::stof(val);
@@ -632,19 +669,29 @@ int main(int argc, char* argv[]) {
         if (config.probe) return run_probe(config);
 
         const unsigned nthreads = resolve_threads(config);
-        std::cout << (config.continue_path.empty()
-                          ? "Architecture: " + describe_architecture(config.hidden)
-                          : "Continuing from: " + config.continue_path)
-                  << "\nThreads: " << nthreads << " (data loading + validation)\n";
+
+        // Resolve the starting net and its label convention FIRST, because the
+        // dataset targets must be encoded to match: a fresh checkerboard is
+        // always a win-prob net, but continuing from an old linear-head
+        // checkpoint must keep raw centipawn targets until it is retrained with
+        // win-prob labels (NetEvaluator auto-detects the convention at eval).
+        const bool fresh = config.continue_path.empty();
+        bool winprob = true;
+        if (fresh) {
+            std::cout << "Architecture: " << describe_architecture(config.hidden) << "\n";
+        } else {
+            std::cout << "Continuing from: " << config.continue_path << "\n";
+        }
+        std::cout << "Threads: " << nthreads << " (data loading + validation)\n";
 
         Dataset train, val;
         if (!config.dataset_path.empty()) {
             std::cout << "Loading Lichess-eval dataset: " << config.dataset_path << "\n";
             CsvLoadStats stats;
-            generate_dataset_csv(train, val, config, stats, nthreads);
+            generate_dataset_csv(train, val, config, winprob, stats, nthreads);
         } else {
             std::cout << "Generating PST-distillation dataset...\n";
-            generate_dataset(train, val, config, nthreads);
+            generate_dataset(train, val, config, winprob, nthreads);
         }
 
         std::cout << "Train: " << train.inputs.size() << " | Val: " << val.inputs.size() << "\n";
@@ -654,9 +701,15 @@ int main(int argc, char* argv[]) {
         std::filesystem::create_directories(run_dir);
 
 
-        BackpropNet::Net net = config.continue_path.empty()
-            ? create_architecture(config.hidden, config.clamp_cp)
-            : load_net(config.continue_path, config.hidden);
+        BackpropNet::Net net;
+        if (fresh) {
+            net = create_architecture(config.hidden, config.clamp_cp);
+        } else {
+            net = load_net(config.continue_path, config.hidden, winprob);
+            std::cout << (winprob ? "Checkpoint label convention: win-prob (S*tanh(cp/S))"
+                                  : "Checkpoint label convention: legacy linear cp")
+                      << "\n";
+        }
         BackpropNetReader::save(run_dir + "/net", net);
 
 
@@ -677,8 +730,10 @@ int main(int argc, char* argv[]) {
              << " BATCH: " << config.batch << " LR: " << config.lr
              << " WEIGHT_DECAY: " << config.weight_decay
              << " PATIENCE: " << config.patience << " CLAMP: " << config.clamp_cp
+             << " PST_SCALE: " << config.pst_scale
              << " MIRROR: " << config.mirror << " CAPTURE_BIAS: " << config.capture_bias
              << " SKIP_MATES: " << config.skip_mates
+             << " LABELS: " << (winprob ? "win-prob" : "linear-cp")
              << " SEED: " << config.seed << "\n"
              << "epoch val_mse lr\n";
 

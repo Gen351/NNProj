@@ -32,9 +32,13 @@
     sanity probes on a trained net (startpos ~ 0, queen-up positive, mirror flips sign):
         ./chess_trainer --probe NET=trained_networks/run_1/net.backprop_net
 
-    Tunables: SAMPLES EPOCHS BATCH LR PATIENCE CLAMP SEED MIRROR CAPTURE_BIAS
+    Tunables: SAMPLES EPOCHS BATCH LR PATIENCE CLAMP PST_SCALE SEED MIRROR CAPTURE_BIAS
               MAX_PLIES DATASET SKIP_MATES OUT
     Full list: ./chess_trainer --help   (see howto/createAI.md for the workflow)
+
+    (Targets are win-probability values tanh(cp/400): the net ends in a TANH
+     output head and NetEvaluator inverts it back to centipawns. Val MSE is in
+     win-prob units. See howto/createAI.md "Label normalization".)
 
     (-DNDEBUG matters: it disables the Matrix bounds asserts in the hot training loops.)
 
@@ -47,6 +51,48 @@
 -- Run: ./chess_test     (must print ALL TESTS PASSED before you trust
                          DATASET= training; covers CSV parsing, SAN replay,
                          eval alignment, and mirror augmentation)
+
+
+- How to compile and run the self-play matchmaker (two nets vs each other):
+
+-- Compile (from chess/):
+        g++ -std=c++17 -DNDEBUG -O3 -pthread self_play.cpp -o self_play
+
+-- Run:
+    NET1 plays White, NET2 plays Black; either may be the literal value "PST"
+    to use the built-in material+pst evaluator instead of a net file.
+    Search limit: DEPTH=N (fixed ply) or MOVETIME=ms (fixed time per move).
+    If both are given, the one written LATER on the command line wins.
+        ./self_play NET1=trained_networks/run_1/net.backprop_net NET2=PST DEPTH=6
+        ./self_play NET1=trained_networks/run_1/net.backprop_net ^
+                    NET2=trained_networks/run_2/net.backprop_net MOVETIME=3000
+
+    Other args: MAX_PLIES=N (safety cap, default 400). Default limit when
+    neither DEPTH nor MOVETIME is given: MOVETIME=1000.
+    THREADS=N: Lazy-SMP searchers per move around ONE match-wide shared
+    transposition table (default 1 = single-threaded). Each helper gets its
+    own NetEvaluator around the same shared net, so this is always safe.
+    HASH=MB: shared transposition-table size in MB (default 64).
+    CONTEMPT=cp: draw-avoidance penalty in centipawns (default 50). A root
+    move that would immediately draw the game -- creating a threefold
+    repetition (3rd occurrence), the fifty-move rule, insufficient material,
+    or stalemate -- is compared as if it scored 2*cp worse, so a non-drawing
+    alternative is preferred whenever it exists and isn't clearly worse. This
+    keeps net-vs-net matches from shuffling into early threefold draws.
+    Set CONTEMPT=0 to disable.
+
+-- What it prints each turn:
+    --- White to move ---          (side to move)
+    [board with last move's from/to squares tinted green/gold]
+    White net <label>: +NN cp      (both nets' White-POV evals of the board)
+    Black net <label>: +NN cp
+    position startpos moves ...    (cumulative move list, UCI-style)
+
+    When the game ends: the final board, then
+        Net <label> Won   or   Draw (<reason>)
+    followed by the full numbered move history.
+
+
 
 
 - UCI mode: it speaks the standard UCI protocol on stdin/stdout.
@@ -62,6 +108,10 @@ $ > quit
     Other useful go forms:  go movetime 1000   (think exactly ~1s)
                             go wtime 300000 btime 300000   (real clocks, ms)
     Load net at runtime:    setoption name EvalFile value path/to/net.backprop_net
+    Transposition table:    setoption name Hash value 128   (MB, default 64;
+                            resizes+clears; ucinewgame also clears it)
+    Multi-thread search:    setoption name Threads value 4  (Lazy-SMP on the
+                            shared transposition table)
     Show board + eval:      d
 
 
