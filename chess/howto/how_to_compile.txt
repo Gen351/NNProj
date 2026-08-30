@@ -109,10 +109,17 @@ $ > quit
                             go wtime 300000 btime 300000   (real clocks, ms)
     Load net at runtime:    setoption name EvalFile value path/to/net.backprop_net
     Transposition table:    setoption name Hash value 128   (MB, default 64;
-                            resizes+clears; ucinewgame also clears it)
+                            stops any running search, then resizes+clears;
+                            ucinewgame also clears it)
     Multi-thread search:    setoption name Threads value 4  (Lazy-SMP on the
                             shared transposition table)
     Show board + eval:      d
+    Warm-up:                each "position" command starts a SILENT
+                            single-threaded search to depth 9 that fills the
+                            shared TT, so a later "go" on that position
+                            searches much faster. No info/bestmove is printed
+                            during warm-up; "go"/"stop"/"position"/"quit"
+                            abort it cleanly.
 
 
 - What you'll see while searching:

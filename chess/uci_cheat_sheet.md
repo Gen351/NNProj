@@ -29,7 +29,7 @@ Commands used by chess GUIs (e.g., Lichess-Bot, Arena, Cutechess) to handshake a
 | `isready` | Synchronizes engine readiness (waits for background threads to finish loading). | `readyok` |
 | `setoption name EvalFile value <path>` | Dynamically loads a new neural network model path during run-time. | `info string loaded eval: NetEvaluator` |
 | `setoption name Threads value <N>` | Sets the number of search threads (Lazy-SMP concurrency, all sharing one transposition table). | `info string Threads set to 8` |
-| `setoption name Hash value <MB>` | Resizes the shared transposition table (default 64 MB, range 4-4096). Clears its contents. | `info string Hash set to 128 MB` |
+| `setoption name Hash value <MB>` | Stops any running search, then resizes the shared transposition table (default 64 MB, range 4-4096). Clears its contents. | `info string Hash set to 128 MB` |
 | `ucinewgame` | Clears the transposition table and resets internal state for a new game session. | *(No output expected)* |
 | `quit` | Stops all active background thread pools and exits the program cleanly. | *(Exits program)* |
 
@@ -52,6 +52,12 @@ position fen r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3
 # Set position from a FEN string AND apply subsequent moves
 position fen r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3 moves f8c5 c2c3
 ```
+
+> **Warm-up:** as soon as a `position` is set, the engine silently starts a
+> background search (single-threaded, capped at depth 9) that fills the shared
+> transposition table — no `info`/`bestmove` output is emitted. A later `go`
+> on the same position reuses that work and searches much faster. `stop`,
+> `position`, `go`, `ucinewgame`, `setoption`, and `quit` all abort it cleanly.
 
 ---
 
@@ -100,7 +106,7 @@ Commands to inspect or interrupt internal engine routines.
 
 | Command | Category | Description |
 | :--- | :--- | :--- |
-| `stop` | **Control** | Immediately interrupts the ongoing `go` search loop and forces the engine to output `bestmove`. |
+| `stop` | **Control** | Immediately interrupts the ongoing `go` search loop and forces the engine to output `bestmove`. Also silently aborts a background warm-up search (no `bestmove`). |
 | `d` or `debug` | **Debug** | Prints an ASCII representation of the current board, fullmove count, halfmove clock, game status, and total legal move count. |
 | `perft <depth>` | **Debug** | Runs interactive move-generation verification count up to `<depth>` on the current board state. |
 
@@ -129,6 +135,7 @@ Below is a trace of a complete interaction sequence for playing a move:
 <<< readyok
 
 >>> position startpos moves e2e4 e7e5
+    (engine silently warms the TT on this position -- no output)
 >>> go depth 6
 <<< info depth 1 score cp 25 nodes 32 time 1 pv g1f3
 <<< info depth 2 score cp 30 nodes 128 time 3 pv g1f3 b8c6
