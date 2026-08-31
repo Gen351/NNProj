@@ -84,7 +84,10 @@ setoption name EvalFile value path/to/net.backprop_net # inside UCI session
 Engine::setEvaluator(loadNetEvaluator(path))         # from C++ code
 ```
 
-On success you'll see: `info string loaded eval: net:path/...`.
+On success you'll see: `info string loaded eval: nnue-acc:path/...` (the load
+compiles your net into the NNUE-style sparse-accumulator evaluator; option
+`EvalQuant 1` uses the quantized int16/int32 accumulator, and compiling with
+`-mavx2` runs that path on AVX2 SIMD).
 On failure the engine keeps running with the material+pst fallback and prints
 an error explaining exactly what was wrong, e.g.:
 

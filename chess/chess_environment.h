@@ -687,90 +687,63 @@ inline bool parseUciMove(const std::string& str, const Position& p, Move& out) {
     return false;
 }
 
-// ASCII board for debugging / selftest output.
 #include <string>
 #include <cstdint>
 
-// 9x9 Pixel Art Piece Sprites: 0 = Transparent/BG, 1 = Dark Outline, 2 = Fill Color
-static const uint8_t PIECES[7][9][9] = {
+// 5x5 Symmetrical Pixel Art Piece Sprites: 0 = Transparent/BG, 1 = Dark Outline, 2 = Fill Color
+static const uint8_t PIECES[7][5][5] = {
     // 0: EMPTY
     {},
     // 1: PAWN
     {
-        {0,0,0,0,0,0,0,0,0},
-        {0,0,0,1,1,1,0,0,0},
-        {0,0,0,1,1,1,0,0,0},
-        {0,0,0,0,1,0,0,0,0},
-        {0,0,0,0,1,0,0,0,0},
-        {0,0,0,1,2,1,0,0,0},
-        {0,0,1,1,1,1,1,0,0},
-        {0,1,2,2,2,2,2,1,0},
-        {0,1,1,1,1,1,1,1,0}
+        {0,0,0,0,0},
+        {0,0,0,0,0},
+        {0,0,1,0,0},
+        {0,1,2,1,0},
+        {0,1,1,1,0}
     },
     // 2: KNIGHT
     {
-        {0,0,0,0,0,0,0,0,0},
-        {0,0,0,1,1,1,1,0,0},
-        {0,0,1,2,2,2,1,0,0},
-        {0,1,2,2,2,2,1,0,0},
-        {0,1,1,2,1,2,1,0,0},
-        {0,0,0,1,2,2,1,0,0},
-        {0,0,1,1,1,1,1,1,0},
-        {0,1,2,2,2,2,2,1,0},
-        {0,1,1,1,1,1,1,1,0}
+        {1,0,0,0,1},
+        {1,1,0,0,1},
+        {1,0,1,0,1},
+        {1,0,0,1,1},
+        {1,0,0,0,1}
     },
     // 3: BISHOP
     {
-        {0,0,0,0,0,0,0,0,0},
-        {0,0,0,0,1,0,0,0,0},
-        {0,0,0,1,2,1,0,0,0},
-        {0,0,1,2,1,2,1,0,0},
-        {0,0,1,2,2,2,1,0,0},
-        {0,0,0,1,2,1,0,0,0},
-        {0,0,1,1,1,1,1,0,0},
-        {0,1,2,2,2,2,2,1,0},
-        {0,1,1,1,1,1,1,1,0}
+        {0,0,1,0,0},
+        {0,1,2,1,0},
+        {1,2,1,2,1},
+        {0,1,2,1,0},
+        {1,1,1,1,1}
     },
     // 4: ROOK
     {
-        {0,0,0,0,0,0,0,0,0},
-        {0,1,0,1,0,1,0,1,0},
-        {0,1,2,1,2,1,2,1,0},
-        {0,1,1,1,1,1,1,1,0},
-        {0,0,1,2,2,2,1,0,0},
-        {0,0,1,2,2,2,1,0,0},
-        {0,1,1,1,1,1,1,1,0},
-        {0,1,2,2,2,2,2,1,0},
-        {0,1,1,1,1,1,1,1,0}
+        {0,0,0,0,0},
+        {1,0,1,0,1},
+        {1,1,1,1,1},
+        {0,1,2,1,0},
+        {0,1,1,1,0}
     },
     // 5: QUEEN
     {
-        {0,1,0,1,0,1,0,1,0},
-        {0,1,2,1,2,1,2,1,0},
-        {0,1,1,1,1,1,1,1,0},
-        {0,0,1,2,2,2,1,0,0},
-        {0,0,0,1,2,1,0,0,0},
-        {0,0,0,1,2,1,0,0,0},
-        {0,0,1,1,1,1,1,0,0},
-        {0,1,1,2,2,2,1,1,0},
-        {0,1,1,1,1,1,1,1,0}
+        {1,0,1,0,1},
+        {1,2,1,2,1},
+        {0,1,2,1,0},
+        {0,1,2,1,0},
+        {1,1,1,1,1}
     },
     // 6: KING
     {
-        {0,0,0,0,1,0,0,0,0},
-        {0,0,0,1,1,1,0,0,0},
-        {0,0,0,0,1,0,0,0,0},
-        {0,0,1,1,1,1,1,0,0},
-        {0,0,1,2,1,2,1,0,0},
-        {0,0,1,2,2,2,1,0,0},
-        {0,0,0,1,1,1,0,0,0},
-        {0,1,2,2,2,2,2,1,0},
-        {0,1,1,1,1,1,1,1,0}
+        {0,0,1,0,0},
+        {0,1,1,1,0},
+        {1,2,1,2,1},
+        {0,1,2,1,0},
+        {1,1,1,1,1}
     }
 };
 
-// `from` / `to` (nullable square indexes) tint the moved-from and moved-to
-// squares with FROM_BG / TO_BG; passing nullptr keeps the plain colors.
 inline std::string boardString(const Position& p,
                                const int* from = nullptr,
                                const int* to = nullptr) {
@@ -787,11 +760,11 @@ inline std::string boardString(const Position& p,
     const std::string RESET    = "\x1b[0m";
 
     for (int r = 7; r >= 0; --r) {
-        // Each square is 11 terminal rows tall
-        for (int sy = 0; sy < 11; ++sy) {
+        // Each square is 7 terminal rows tall (1 top padding + 5 piece + 1 bottom padding)
+        for (int sy = 0; sy < 7; ++sy) {
             
-            // Vertically center rank numbers on row index 5
-            if (sy == 5) {
+            // Vertically center rank numbers on row index 3
+            if (sy == 3) {
                 out += " " + std::to_string(r + 1) + " ";
             } else {
                 out += "   ";
@@ -804,18 +777,18 @@ inline std::string boardString(const Position& p,
                 if (from && sq == *from) sqBg = FROM_BG;
                 else if (to && sq == *to) sqBg = TO_BG;
                 
-                int pc = p.board[sqOf(f, r)];
+                int pc = p.board[sq];
                 int pcType = (pc != EMPTY) ? (pc > 0 ? pc : -pc) : 0;
                 bool isWhite = pc > 0;
 
-                // Each square is 11 pixel blocks wide (22 terminal characters)
-                for (int sx = 0; sx < 11; ++sx) {
+                // Each square is 7 pixel blocks wide (14 terminal spaces wide)
+                for (int sx = 0; sx < 7; ++sx) {
                     
                     // 1-pixel outer padding boundary / empty cell check
-                    if (sy == 0 || sy == 10 || sx == 0 || sx == 10 || pcType == 0) {
+                    if (sy == 0 || sy == 6 || sx == 0 || sx == 6 || pcType == 0) {
                         out += sqBg + "  ";
                     } else {
-                        // Read from 9x9 matrix offset by 1
+                        // Read from 5x5 matrix offset by 1
                         uint8_t pixel = PIECES[pcType][sy - 1][sx - 1];
                         
                         if (pixel == 0) {
@@ -832,14 +805,14 @@ inline std::string boardString(const Position& p,
         }
     }
 
-    // Horizontally center file coordinates below 22-char wide cells
+    // Horizontally center file coordinates below 14-char wide cells (6 spaces + char + 7 spaces)
     out += "   ";
     for (int f = 0; f < 8; ++f) {
-        out += "          ";
+        out += "      ";
         out += static_cast<char>('a' + f);
-        out += "           ";
+        out += "       ";
     }
-    out += "\n\n\n";
+    out += "\n\n";
 
     return out;
 }

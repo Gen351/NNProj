@@ -75,6 +75,55 @@ inline float winProbToCp(const float y) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared net-inspection helpers (used by NetEvaluator and NNUEEvaluator).
+// ---------------------------------------------------------------------------
+
+// True if the net's final non-weight layer is a TANH activation, i.e. it was
+// trained with the win-probability convention (output in (-1,1)).
+inline bool netHasTrailingTanh(const BackpropNet::Net& net) {
+    for (auto it = net.layers.rbegin(); it != net.layers.rend(); ++it) {
+        if ((*it)->get_type() == "DEN") break;     // weights come after activations
+        if ((*it)->get_type() == "ACT") {
+            const auto* a = static_cast<const BackpropNet::ActivationLayer*>(it->get());
+            return a->get_activation() == BackpropNet::ActivationLayer::TANH;
+        }
+    }
+    return false;
+}
+
+// Validates the eval-net contract shared by every net-backed evaluator: the
+// first Dense layer must take exactly STATE_SIZE inputs and the last Dense
+// layer must produce exactly 1 output. Throws std::runtime_error otherwise.
+inline void validateEvalNet(const BackpropNet::Net& net, const std::string& source) {
+    const BackpropNet::DenseLayer* first = nullptr;
+    for (const auto& l : net.layers) {
+        if (l->get_type() == "DEN") {
+            first = static_cast<const BackpropNet::DenseLayer*>(l.get());
+            break;
+        }
+    }
+    if (!first)
+        throw std::runtime_error("eval net '" + source + "' has no Dense (DEN) layers");
+
+    if (first->get_weights().cols() != STATE_SIZE)
+        throw std::runtime_error(
+            "eval net '" + source + "' input size mismatch: expected " +
+            std::to_string(STATE_SIZE) + " (see howto/createAI.md), got " +
+            std::to_string(first->get_weights().cols()));
+
+    const BackpropNet::DenseLayer* last = nullptr;
+    for (auto it = net.layers.rbegin(); it != net.layers.rend(); ++it) {
+        if ((*it)->get_type() == "DEN") {
+            last = static_cast<const BackpropNet::DenseLayer*>(it->get());
+            break;
+        }
+    }
+    if (!last || last->get_biases().size() != 1)
+        throw std::runtime_error("eval net '" + source +
+                                 "' must end with a Dense layer producing exactly 1 output");
+}
+
+// ---------------------------------------------------------------------------
 // Material + piece-square tables ("Simplified Evaluation Function" values).
 // Tables below are written visually (first row = rank 8); they are converted
 // to a1-indexed lookups once at construction.
@@ -179,8 +228,8 @@ class NetEvaluator final : public Evaluator {
 public:
     explicit NetEvaluator(std::shared_ptr<BackpropNet::Net> net, std::string source)
         : net_(std::move(net)), source_(std::move(source)) {
-        validate();
-        winprob_ = hasTrailingTanh(*net_);
+        validateEvalNet(*net_, source_);
+        winprob_ = netHasTrailingTanh(*net_);
         buf_.reserve(STATE_SIZE);
     }
 
@@ -205,47 +254,6 @@ private:
     std::string source_;
     bool winprob_ = false;
     std::vector<float> buf_;
-
-    // True if the net's final layer is a TANH activation (win-prob convention).
-    bool hasTrailingTanh(const BackpropNet::Net& net) const {
-        for (auto it = net_.get()->layers.rbegin(); it != net_.get()->layers.rend(); ++it) {
-            if ((*it)->get_type() == "DEN") break;     // weights come after activations
-            if ((*it)->get_type() == "ACT") {
-                const auto* a = static_cast<const BackpropNet::ActivationLayer*>(it->get());
-                return a->get_activation() == BackpropNet::ActivationLayer::TANH;
-            }
-        }
-        return false;
-    }
-
-    void validate() const {
-        const BackpropNet::DenseLayer* first = nullptr;
-        for (const auto& l : net_->layers) {
-            if (l->get_type() == "DEN") {
-                first = static_cast<const BackpropNet::DenseLayer*>(l.get());
-                break;
-            }
-        }
-        if (!first)
-            throw std::runtime_error("NetEvaluator: '" + source_ + "' has no Dense (DEN) layers");
-
-        if (first->get_weights().cols() != STATE_SIZE)
-            throw std::runtime_error(
-                "NetEvaluator: '" + source_ + "' input size mismatch: expected " +
-                std::to_string(STATE_SIZE) + " (see howto/createAI.md), got " +
-                std::to_string(first->get_weights().cols()));
-
-        const BackpropNet::DenseLayer* last = nullptr;
-        for (auto it = net_->layers.rbegin(); it != net_->layers.rend(); ++it) {
-            if ((*it)->get_type() == "DEN") {
-                last = static_cast<const BackpropNet::DenseLayer*>(it->get());
-                break;
-            }
-        }
-        if (!last || last->get_biases().size() != 1)
-            throw std::runtime_error("NetEvaluator: '" + source_ +
-                                     "' must end with a Dense layer producing exactly 1 output");
-    }
 };
 
 // Loads a .backprop_net file and wraps it (throws on any validation failure).

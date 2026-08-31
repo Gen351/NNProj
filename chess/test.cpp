@@ -23,6 +23,13 @@
 //                              miss (full 64-bit key), deeper same-gen
 //                              replacement, stale-gen replacement, ply-normalized
 //                              mate scores, eval-field round-trip
+//   [8] NNUE accumulator       -- NNUEEvaluator (feature-major sparse first
+//                              layer, optional int16/int32 quantization) is
+//                              weight-exact with NetEvaluator on a real game +
+//                              crafted FENs, quant stays within tolerance,
+//                              adaptive accumulator width picks int16 vs int32
+//                              per net, non-16-aligned widths pad correctly,
+//                              malformed nets rejected
 //
 // Compile (from chess/):
 //   g++ -std=c++17 -DNDEBUG -O2 test.cpp -o chess_test
@@ -37,6 +44,7 @@
 
 #include "./chess_environment.h"
 #include "./evaluator.h"
+#include "./nnue_evaluator.h"
 #include "./dataset_tools.h"
 #include "./search.h"
 #include "./transposition_table.h"
@@ -372,6 +380,185 @@ void test_transposition_table() {
           "eval field round-trips a stored static evaluation");
 }
 
+// Builds an eval-shaped net (inputs -> hidden -> ... -> 1) with deterministic
+// weights, so both evaluators see the exact same numbers.
+BackpropNet::Net make_eval_net(
+    const std::vector<int>& arch,
+    BackpropNet::ActivationLayer::ActType hidden_act,
+    const bool tanh_head,
+    const float scale = 0.01f) {
+    BackpropNet::Net net;
+    for (size_t i = 0; i + 1 < arch.size(); ++i) {
+        auto d = std::make_unique<BackpropNet::DenseLayer>(
+            arch[i], arch[i + 1], BackpropNet::DenseLayer::InitType::XAVIER);
+        auto& w = d->get_weights();
+        auto& b = d->get_biases();
+        for (size_t r = 0; r < w.rows(); ++r) {
+            b[r] = static_cast<float>((static_cast<int>(r % 5) - 2)) * scale;
+            for (size_t c = 0; c < w.cols(); ++c) {
+                const int v = (static_cast<int>((r * 7 + c) % 9) - 4);
+                w(r, c) = (static_cast<float>(v) * scale) *
+                          (((r + c) % 2 == 0) ? 1.0f : -1.0f);
+            }
+        }
+        net.add_layer(std::move(d));
+        if (i + 2 == arch.size()) {
+            if (tanh_head)
+                net.add_layer(std::make_unique<BackpropNet::ActivationLayer>(
+                    BackpropNet::ActivationLayer::TANH));
+        } else {
+            net.add_layer(std::make_unique<BackpropNet::ActivationLayer>(hidden_act));
+        }
+    }
+    return net;
+}
+
+void test_nnue_accumulator() {
+    std::cout << "[8] nnue accumulator parity + quantization\n";
+
+    auto check_max = [](const std::string& what, const float tol,
+                        const std::vector<float>& a,
+                        const std::vector<float>& b) {
+        float worst = 0.0f;
+        for (size_t i = 0; i < a.size(); ++i)
+            worst = std::max(worst, std::fabs(a[i] - b[i]));
+        check(worst <= tol, what + " (worst diff " + std::to_string(worst) + ")");
+    };
+
+    // Position set: full real-game replay (both sides to move, kingside+queenside
+    // castle right bits) plus crafted FENs for EP and a black-to-move castling
+    // position. Any setFen failure is itself a testable failure.
+    std::vector<chess::ChessGame> positions;
+    positions.emplace_back();
+    {
+        chess::ChessGame g;
+        for (const std::string& san : REAL_GAME) {
+            chess::Move m;
+            if (!dataset::san_to_move(g.pos, san, m)) { check(false, "parity replay: '" + san + "'"); return; }
+            g.make(m);
+            positions.push_back(g);
+        }
+    }
+    auto add_fen = [&](const std::string& fen) {
+        try {
+            positions.emplace_back(fen);
+            check(true, "parity FEN accepted: " + fen);
+        } catch (const std::exception&) {
+            check(false, "parity FEN rejected: " + fen);
+        }
+    };
+    add_fen("4k3/8/8/3Pp3/8/8/8/4K3 w - e6 0 1");                    // en passant
+    add_fen("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1");                 // black to move + castling
+
+    // TANH-head net (win-prob convention, tests winProbToCp inversion parity).
+    auto netA = std::make_shared<BackpropNet::Net>(std::move(
+        make_eval_net({chess::STATE_SIZE, 8, 1}, BackpropNet::ActivationLayer::TANH, true)));
+    // LEAK-hidden, linear-head net (tests the raw-linear path).
+    auto netB = std::make_shared<BackpropNet::Net>(std::move(
+        make_eval_net({chess::STATE_SIZE, 8, 8, 1}, BackpropNet::ActivationLayer::LEAK, false)));
+
+    auto run_nets = [&](const std::string& tag,
+                        const std::shared_ptr<BackpropNet::Net>& net) {
+        chess::NetEvaluator ne(net, "mem-ref");
+        chess::NNUEEvaluator acc(net, "mem-acc");
+        chess::NNUEEvaluator accq(net, "mem-accq", true);
+
+        check(acc.name().find("nnue-acc") != std::string::npos,
+              tag + ": name() reports nnue-acc");
+        check(accq.name().find("(quant:") != std::string::npos,
+              tag + ": quantized evaluator reports (quant:int16-acc|int32-acc)");
+
+        std::vector<float> ref, fl, qu;   // ref = NetEvaluator, fl = float acc, qu = int16 acc
+        for (const auto& g : positions) {
+            ref.push_back(ne.evaluate(g.pos));
+            fl.push_back(acc.evaluate(g.pos));
+            qu.push_back(accq.evaluate(g.pos));
+        }
+        check(ref.size() == positions.size(), tag + ": evaluated " + std::to_string(ref.size())
+                                                  + " positions");
+        check_max(tag + ": float accumulator == NetEvaluator", 0.05f, ref, fl);
+        check_max(tag + ": quantized accumulator within tolerance", 5.0f, ref, qu);
+        check_max(tag + ": quantized within tolerance of float", 5.0f, fl, qu);
+    };
+
+    run_nets("tanh-head", netA);
+    run_nets("leaky-linear-head", netB);
+
+    // Non-16-multiple and realistic hidden widths exercise the padded row
+    // stride (tail handling) and the int32-accumulator path respectively.
+    auto netC = std::make_shared<BackpropNet::Net>(std::move(
+        make_eval_net({chess::STATE_SIZE, 20, 1}, BackpropNet::ActivationLayer::RELU, false)));
+    auto netD = std::make_shared<BackpropNet::Net>(std::move(
+        make_eval_net({chess::STATE_SIZE, 256, 1}, BackpropNet::ActivationLayer::RELU, false)));
+    run_nets("hidden-20 (non-16-aligned)", netC);
+    run_nets("hidden-256", netD);
+
+    chess::NNUEEvaluator tc(netC, "mem-c", true);
+    chess::NNUEEvaluator td(netD, "mem-d", true);
+    check(tc.name().find("(quant:int32-acc)") != std::string::npos,
+          "hidden-20 quantizes to the int32 accumulator (got: " + tc.name() + ")");
+    check(td.name().find("(quant:int32-acc)") != std::string::npos,
+          "hidden-256 quantizes to the int32 accumulator (got: " + td.name() + ")");
+
+    // Crafted net whose first layer has ONE nonzero weight per hidden unit
+    // (|w| just under max -> per-unit worst-case fits int16): must select the
+    // fast 16-lane int16 accumulator and stay exact.
+    auto netE = std::make_shared<BackpropNet::Net>(std::move(
+        make_eval_net({chess::STATE_SIZE, 4, 1}, BackpropNet::ActivationLayer::RELU, false)));
+    {
+        auto& head_w = static_cast<BackpropNet::DenseLayer&>(*netE->layers.front());
+        head_w.get_biases().assign(head_w.get_biases().size(), 0.0f);
+        head_w.get_weights().data.assign(head_w.get_weights().data.size(), 0.0f);
+        for (size_t o = 0; o < 4; ++o)
+            head_w.get_weights()(o, 10 + o) = 0.25f;   // one feature per unit
+    }
+    chess::NNUEEvaluator te(netE, "mem-e", true);
+    check(te.name().find("(quant:int16-acc)") != std::string::npos,
+          "sparse single-feature net quantizes to the int16 accumulator (got: "
+              + te.name() + ")");
+    run_nets("sparse single-feature", netE);
+
+#if defined(__AVX2__)
+    check(true, "built with AVX2 intrinsics (SIMD accumulation/dense active)");
+#else
+    check(true, "scalar fallback build (no -mavx2): SIMD paths inactive");
+#endif
+
+    // Pinned-head agreement: zero weights + atanh(0.5) bias must read the same
+    // for every evaluator, inverting to ~+220 cp rather than a raw 0.5.
+    auto pin = std::make_shared<BackpropNet::Net>(std::move(
+        make_eval_net({chess::STATE_SIZE, 1}, BackpropNet::ActivationLayer::TANH, true)));
+    {
+        auto& head_w = static_cast<BackpropNet::DenseLayer&>(*pin->layers.front());
+        head_w.get_biases()[0] = static_cast<float>(std::atanh(0.5));
+        head_w.get_weights().data.assign(head_w.get_weights().data.size(), 0.0f);
+    }
+    chess::NNUEEvaluator pacc(pin, "mem-pin");
+    chess::NNUEEvaluator paccq(pin, "mem-pinq", true);
+    chess::ChessGame start;
+    const float pv = pacc.evaluate(start.pos);
+    const float pvq = paccq.evaluate(start.pos);
+    check(pv > 150.0f && pv < 300.0f && std::isfinite(pv),
+          "pinned y=0.5 inverts to ~+220 cp via accumulator (got " + std::to_string(pv) + ")");
+    check(pvq > 150.0f && pvq < 300.0f && std::isfinite(pvq),
+          "pinned y=0.5 inverts to ~+220 cp via quantized accumulator (got " + std::to_string(pvq) + ")");
+
+    // Both evaluators reject malformed nets (bad input size, wrong output size).
+    const std::string bad_in = "mem-bad-in";
+    auto badInNet = std::make_shared<BackpropNet::Net>(std::move(
+        make_eval_net({chess::STATE_SIZE - 5, 4, 1}, BackpropNet::ActivationLayer::RELU, false)));
+    auto badOutNet = std::make_shared<BackpropNet::Net>(std::move(
+        make_eval_net({chess::STATE_SIZE, 8, 3}, BackpropNet::ActivationLayer::RELU, false)));
+    bool neThrew = false, accThrew = false;
+    try { chess::NetEvaluator t(badInNet, bad_in); } catch (const std::exception&) { neThrew = true; }
+    try { chess::NNUEEvaluator t(badInNet, bad_in); } catch (const std::exception&) { accThrew = true; }
+    check(neThrew && accThrew, "bad input size rejected by NetEvaluator and NNUEEvaluator");
+    neThrew = accThrew = false;
+    try { chess::NetEvaluator t(badOutNet, bad_in); } catch (const std::exception&) { neThrew = true; }
+    try { chess::NNUEEvaluator t(badOutNet, bad_in); } catch (const std::exception&) { accThrew = true; }
+    check(neThrew && accThrew, "wrong output size rejected by NetEvaluator and NNUEEvaluator");
+}
+
 }   // namespace
 
 int main() {
@@ -383,6 +570,7 @@ int main() {
     test_mirror();
     test_winprob();
     test_transposition_table();
+    test_nnue_accumulator();
 
     std::cout << "=============================\n"
               << (g_failures == 0 ? "ALL TESTS PASSED\n" : "TESTS FAILED\n");

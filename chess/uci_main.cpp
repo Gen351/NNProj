@@ -24,6 +24,7 @@
 
 #include "./chess_environment.h"
 #include "./evaluator.h"
+#include "./nnue_evaluator.h"
 #include "./search.h"
 
 namespace {
@@ -186,7 +187,8 @@ void runPerftCli(const std::string& fen, const int maxDepth) {
 // searcher -- primary or helper -- owns its OWN Evaluator instance; helpers
 // wrap the SAME shared_ptr<BackpropNet::Net> as the primary. That is safe
 // because a net is read-only during search, and it dodges the one real
-// sharing hazard: NetEvaluator's internal state buffer is per-instance.
+// sharing hazard: NetEvaluator/NNUEEvaluator keep their state buffers
+// per-instance.
 // ---------------------------------------------------------------------------
 struct Engine {
     chess::TranspositionTable tt;   // shared across primary + Lazy-SMP helpers
@@ -196,6 +198,8 @@ struct Engine {
     std::thread worker;
     std::atomic<bool> searching{false};
     std::atomic<bool> reporting{false};   // worker thread should emit bestmove
+
+    bool quantizeEval = false;   // EvalQuant: int16 first layer on next net load
 
     Engine() { tt.setSize(64); }
 
@@ -291,11 +295,11 @@ bool tryLoadNet(Engine& eng, const std::string& path) {
     try {
         auto net = std::make_shared<BackpropNet::Net>(BackpropNetReader::load(path));
         eng.joinSearch();
-        eng.evaluator = std::make_shared<chess::NetEvaluator>(net, path);
-        // Helpers rebuild their own NetEvaluator around this same shared net.
-        eng.evaluatorFactory = [net, path] {
-            return std::shared_ptr<chess::Evaluator>(
-                std::make_shared<chess::NetEvaluator>(net, path));
+        eng.evaluator = chess::makeNnueEvaluator(net, path, eng.quantizeEval);
+        // Helpers rebuild their own evaluator around this same shared net; the
+        // quantized first layer is a per-instance decision baked in at load.
+        eng.evaluatorFactory = [net, path, quant = eng.quantizeEval] {
+            return chess::makeNnueEvaluator(net, path, quant);
         };
         std::cout << "info string loaded eval: " << eng.evaluator->name() << std::endl;
         return true;
@@ -347,6 +351,7 @@ int uciLoop(const std::string& startupNetPath) {
                       << "option name Hash type spin default 64 min 4 max 4096\n"
                       << "option name Threads type spin default " << eng.searchThreads
                       << " min 1 max 64\n"
+                      << "option name EvalQuant type spin default 0 min 0 max 1\n"
                       << "uciok" << std::endl;
         } else if (cmd == "isready") {
             std::cout << "readyok" << std::endl;
@@ -369,6 +374,13 @@ int uciLoop(const std::string& startupNetPath) {
                 try {
                     eng.searchThreads = std::clamp(std::stoi(value), 1, 64);
                     std::cout << "info string Threads set to " << eng.searchThreads << std::endl;
+                } catch (...) { }
+            }
+            else if (name == "EvalQuant") {
+                try {
+                    eng.quantizeEval = std::clamp(std::stoi(value), 0, 1) != 0;
+                    std::cout << "info string EvalQuant set to " << eng.quantizeEval
+                              << " (applies on next EvalFile load)" << std::endl;
                 } catch (...) { }
             }
         } else if (cmd == "ucinewgame") {

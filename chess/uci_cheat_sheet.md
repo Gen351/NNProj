@@ -27,7 +27,8 @@ Commands used by chess GUIs (e.g., Lichess-Bot, Arena, Cutechess) to handshake a
 | :--- | :--- | :--- |
 | `uci` | Requests engine identification and available custom parameters. | `id name NNProj Chess 0.1` ... `uciok` |
 | `isready` | Synchronizes engine readiness (waits for background threads to finish loading). | `readyok` |
-| `setoption name EvalFile value <path>` | Dynamically loads a new neural network model path during run-time. | `info string loaded eval: NetEvaluator` |
+| `setoption name EvalFile value <path>` | Dynamically loads a new neural network model path during run-time. | `info string loaded eval: nnue-acc:models/v1.backprop_net (win-prob)` |
+| `setoption name EvalQuant value <0\|1>` | Sets whether the next EvalFile load quantizes the accumulator's int16 first layer (AVX2-ready NNUE path). Default 0. | `info string EvalQuant set to 1 (applies on next EvalFile load)` |
 | `setoption name Threads value <N>` | Sets the number of search threads (Lazy-SMP concurrency, all sharing one transposition table). | `info string Threads set to 8` |
 | `setoption name Hash value <MB>` | Stops any running search, then resizes the shared transposition table (default 64 MB, range 4-4096). Clears its contents. | `info string Hash set to 128 MB` |
 | `ucinewgame` | Clears the transposition table and resets internal state for a new game session. | *(No output expected)* |
@@ -123,10 +124,11 @@ Below is a trace of a complete interaction sequence for playing a move:
 <<< option name EvalFile type string default
 <<< option name Hash type spin default 64 min 4 max 4096
 <<< option name Threads type spin default 6 min 1 max 64
+<<< option name EvalQuant type spin default 0 min 0 max 1
 <<< uciok
 
 >>> setoption name EvalFile value models/v1.backprop_net
-<<< info string loaded eval: NetEvaluator (models/v1.backprop_net)
+<<< info string loaded eval: nnue-acc:models/v1.backprop_net (win-prob)
 
 >>> setoption name Hash value 128
 <<< info string Hash set to 128 MB

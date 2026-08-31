@@ -2,6 +2,9 @@
 
 -- Compile (from chess/):
         g++ -std=c++17 -DNDEBUG -O3 -pthread uci_main.cpp -o chess_engine
+    (AVX2 build -- same engine, SIMD quantized-NNUE eval; requires AVX2 CPU):
+        g++ -std=c++17 -DNDEBUG -O3 -mavx2 -pthread uci_main.cpp -o chess_engine
+    (optional FMA for the downstream float dense: add -mfma)
 
 -- Run (from chess/):
     (UCI engine mode -- what you use with a GUI / for playing):
@@ -57,6 +60,7 @@
 
 -- Compile (from chess/):
         g++ -std=c++17 -DNDEBUG -O3 -pthread self_play.cpp -o self_play
+        g++ -std=c++17 -DNDEBUG -O3 -mavx2 -pthread self_play.cpp -o self_play
 
 -- Run:
     NET1 plays White, NET2 plays Black; either may be the literal value "PST"
@@ -70,9 +74,13 @@
     Other args: MAX_PLIES=N (safety cap, default 400). Default limit when
     neither DEPTH nor MOVETIME is given: MOVETIME=1000.
     THREADS=N: Lazy-SMP searchers per move around ONE match-wide shared
-    transposition table (default 1 = single-threaded). Each helper gets its
-    own NetEvaluator around the same shared net, so this is always safe.
+    transposition table (default: CPU cores - 2, matching the UCI engine's
+    Threads). The primary runs concurrently with THREADS-1 helpers, so CPU
+    usage tracks the engine. Each helper gets its own sparse NNUEEvaluator
+    around the same shared net, so this is always safe.
     HASH=MB: shared transposition-table size in MB (default 64).
+    QUANT=0|1: use the quantized (int16/int32, AVX2-ready) accumulator first
+    layer for the NNUE eval path (default 0 = exact float parity).
     CONTEMPT=cp: draw-avoidance penalty in centipawns (default 50). A root
     move that would immediately draw the game -- creating a threefold
     repetition (3rd occurrence), the fifty-move rule, insufficient material,
@@ -83,6 +91,8 @@
 
 -- What it prints each turn:
     --- White to move ---          (side to move)
+    info depth D score cp/mate ... nodes N time T pv ...   (per search
+                                                             iteration)
     [board with last move's from/to squares tinted green/gold]
     White net <label>: +NN cp      (both nets' White-POV evals of the board)
     Black net <label>: +NN cp
@@ -108,6 +118,11 @@ $ > quit
     Other useful go forms:  go movetime 1000   (think exactly ~1s)
                             go wtime 300000 btime 300000   (real clocks, ms)
     Load net at runtime:    setoption name EvalFile value path/to/net.backprop_net
+                            (engine prints "info string loaded eval: nnue-acc:...")
+    Quantize eval layers:   setoption name EvalQuant value 1  (int16/int32
+                            accumulator first layer; applies on the NEXT
+                            EvalFile load; loaded-eval line reports
+                            nnue-acc:... (quant:int16-acc|int32-acc))
     Transposition table:    setoption name Hash value 128   (MB, default 64;
                             stops any running search, then resizes+clears;
                             ucinewgame also clears it)

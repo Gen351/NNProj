@@ -8,11 +8,12 @@
 // .backprop_net file (see howto/createAI.md). If both DEPTH and MOVETIME are
 // given, the one written LATER on the command line wins.
 //
-// Each turn the players alternate: the side to move searches with the Searcher
+// Each turn the players alternate: the side to move searches with THREADS
+// Lazy-SMP searchers (a primary plus helpers sharing one match-wide table)
 // under the chosen limit, plays its best move, and the loop repeats until a
 // game-ending status (or MAX_PLIES safety cap). Output mimics the engine's
-// UCI trace: board ("d"), the chosen move recorded as "position moves ...",
-// then the winner and the full move history.
+// UCI trace: per-iteration "info ..." lines, board ("d"), the chosen move
+// recorded as "position moves ...", then the winner and the full move history.
 
 #include <algorithm>
 #include <cctype>
@@ -22,12 +23,14 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "./chess_environment.h"
 #include "./evaluator.h"
+#include "./nnue_evaluator.h"
 #include "./search.h"
 #include "./transposition_table.h"
 
@@ -41,8 +44,12 @@ struct Config {
     int depth = -1;
     float contempt = 50.0f;  // draw contempt in cp (see Searcher::setDrawContempt)
     size_t max_plies = 400;
-    int threads = 1;         // Lazy-SMP searchers per move (1 = single-threaded)
-    size_t hash_mb = 64;     // shared transposition-table size
+    int threads = [] {   // default matches the UCI engine's Threads option
+        const unsigned hw = std::thread::hardware_concurrency();
+        return hw > 2 ? static_cast<int>(hw) - 2 : 1;
+    }();                 // Lazy-SMP searchers per move (1 = single-threaded)
+    size_t hash_mb = 64; // shared transposition-table size
+    bool quant = false;      // QUANT=1: int16-quantized (AVX2-ready) first layer
 };
 
 struct Player {
@@ -55,6 +62,8 @@ struct Player {
 };
 
 void print_usage() {
+    const unsigned hw = std::thread::hardware_concurrency();
+    const int def_threads = hw > 2 ? static_cast<int>(hw) - 2 : 1;
     std::cout
         << "NNProj Chess Self-Play\n\n"
         << "Pitches two evaluators against each other. NET1 plays White, NET2 Black.\n"
@@ -77,9 +86,12 @@ void print_usage() {
         << "                   insufficient material, stalemate) is compared as if it\n"
         << "                   scored 2*cp worse, so repeats into draws are avoided\n"
         << "  THREADS=N        Lazy-SMP searchers per move around a shared TT\n"
-        << "                   (default 1 = single-threaded; each helper gets its own\n"
-        << "                   NetEvaluator around the same shared net)\n"
+        << "                   (default " << def_threads << " = CPU cores - 2, matching the\n"
+        << "                   UCI engine; each helper gets its own evaluator\n"
+        << "                   around the same shared net)\n"
         << "  HASH=MB          shared transposition-table size (default 64)\n"
+        << "  QUANT=0|1        int16-quantize the accumulator first layer for the\n"
+        << "                   NNUE (AVX2-ready) eval path (default 0)\n"
         << "  MAX_PLIES=N      safety cap (default 400) to avoid endless draws\n";
 }
 
@@ -105,6 +117,7 @@ Config parse_args(int argc, char** argv) {
         else if (key == "CONTEMPT") cfg.contempt = std::stof(val);
         else if (key == "THREADS")  cfg.threads = std::stoi(val);
         else if (key == "HASH")     cfg.hash_mb = std::stoull(val);
+        else if (key == "QUANT")    cfg.quant = (std::stoi(val) != 0);
         else if (key == "MAX_PLIES") cfg.max_plies = std::stoull(val);
         else throw std::runtime_error("parse_args: unknown option '" + key + "'");
     }
@@ -123,7 +136,7 @@ std::string base_name(const std::string& path) {
     return std::filesystem::path(path).filename().string();
 }
 
-Player make_player(const std::string& spec) {
+Player make_player(const std::string& spec, const bool quant) {
     Player p;
     std::string lower = spec;
     for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -134,13 +147,12 @@ Player make_player(const std::string& spec) {
         p.factory = [] { return chess::makePstEvaluator(); };
     } else {
         // Load the net ONCE; helpers wrap the same read-only net in their own
-        // NetEvaluator (per-thread state buffers, safe during search).
+        // accumulator evaluator (per-instance state buffers, safe during search).
         auto net = std::make_shared<BackpropNet::Net>(BackpropNetReader::load(spec));
-        p.eval = std::make_shared<chess::NetEvaluator>(net, spec);
+        p.eval = chess::makeNnueEvaluator(net, spec, quant);
         p.label = base_name(spec);
-        p.factory = [net, spec] {
-            return std::shared_ptr<chess::Evaluator>(
-                std::make_shared<chess::NetEvaluator>(net, spec));
+        p.factory = [net, spec, quant] {
+            return chess::makeNnueEvaluator(net, spec, quant);
         };
     }
     return p;
@@ -159,8 +171,8 @@ int main(int argc, char** argv) {
     try {
         const Config cfg = parse_args(argc, argv);
 
-        Player white = make_player(cfg.net1);
-        Player black = make_player(cfg.net2);
+        Player white = make_player(cfg.net1, cfg.quant);
+        Player black = make_player(cfg.net2, cfg.quant);
         std::cout << "White: " << white.label << "\n"
                   << "Black: " << black.label << "\n"
                   << "Limit : " << (cfg.use_time
@@ -186,9 +198,10 @@ int main(int argc, char** argv) {
             const bool whiteMove = game.pos.side > 0;
             Player& mover = whiteMove ? white : black;
 
-            std::cout << "--- " << (whiteMove ? "White" : "Black")
+			std::cout << std::flush << "--- " << (whiteMove ? "White" : "Black")
                       << " to move ---\n";
             std::cout << chess::boardString(game.pos, &lastFrom, &lastTo);
+
 
             const float eW = white.eval->evaluate(game.pos);
             const float eB = black.eval->evaluate(game.pos);
@@ -198,36 +211,48 @@ int main(int argc, char** argv) {
 
             // Lazy-SMP: the primary searcher plus N-1 helpers all scan the
             // same tree from the root, every thread writing into the one
-            // shared table. The primary returns the first completed iteration;
-            // helpers are told to stop and then joined.
+            // shared table. Helpers are spawned FIRST (each on its own
+            // evaluator) and run concurrently with the primary; once the
+            // primary returns they are stopped and joined.
             std::vector<std::shared_ptr<chess::Evaluator>> helperEvals;
             std::vector<std::unique_ptr<chess::Searcher>> helpers;
             std::vector<std::unique_ptr<std::thread>> helperThreads;
-            helperEvals.reserve(static_cast<size_t>(cfg.threads - 1));
-            helpers.reserve(static_cast<size_t>(cfg.threads - 1));
-            helperThreads.reserve(static_cast<size_t>(cfg.threads - 1));
 
             chess::SearchResult res;
             {
                 chess::Searcher primary(*mover.eval, &table);
                 primary.setDrawContempt(cfg.contempt);
-                res = primary.think(game, make_limits(cfg));
+                primary.onInfo = [](const chess::SearchInfo& i) {
+                    std::ostringstream out;
+                    out << "info depth " << i.depth << " score ";
+                    if (i.mate) out << "mate " << i.mateIn;
+                    else        out << "cp " << static_cast<long long>(i.scoreCp);
+                    out << " nodes " << i.nodes << " time " << i.timeMs << " pv";
+                    for (const chess::Move& m : i.pv) out << ' ' << chess::moveToUci(m);
+                    std::cout << out.str() << '\n';
+                };
 
-                for (int t = 1; t < cfg.threads; ++t) {
+                const int n = std::clamp(cfg.threads, 1, 64);
+                helperEvals.reserve(static_cast<size_t>(n - 1));
+                helpers.reserve(static_cast<size_t>(n - 1));
+                helperThreads.reserve(static_cast<size_t>(n - 1));
+                for (int t = 1; t < n; ++t) {
                     // The factory's shared_ptr must be retained for the whole
-                    // search: Searcher holds an Evaluator&, and NetEvaluator's
-                    // per-thread state buffer would be freed with it.
+                    // search: Searcher holds an Evaluator&, and the evaluator's
+                    // per-thread state buffers would be freed with it.
                     auto ev = mover.factory();
                     auto helper = std::make_unique<chess::Searcher>(*ev, &table);
                     helper->setDrawContempt(cfg.contempt);
                     chess::Searcher* raw = helper.get();
                     helperEvals.push_back(std::move(ev));
                     helpers.push_back(std::move(helper));
-                    helperThreads.push_back(std::make_unique<std::thread>([&, raw] {
-                        (void)raw->think(game, make_limits(cfg));
-                    }));
+                    helperThreads.push_back(std::make_unique<std::thread>(
+                        [&game, &cfg, raw] { (void)raw->think(game, make_limits(cfg)); }));
                 }
-                for (auto& h : helpers) h->stop();
+
+                res = primary.think(game, make_limits(cfg));   // helpers run in parallel
+
+                for (auto& h : helpers) h->stop();             // release their cores now
                 for (auto& th : helperThreads) if (th) th->join();
             }
             if (!res.hasMove) { game_over_reason = st.reason; break; }
