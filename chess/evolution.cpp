@@ -1,12 +1,17 @@
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -18,6 +23,9 @@
 #include "./chess_environment.h"
 #include "./evaluator.h"
 #include "./dataset_tools.h"
+#include "./search.h"
+#include "./transposition_table.h"
+#include "./nnue_evaluator.h"
 
 namespace {
 
@@ -44,6 +52,23 @@ struct Config {
     std::string net_path;
     int win_prob = -1;       // -1 = auto (fresh -> linear, CONTINUE -> checkpoint)
     bool probe = false;
+
+    // Evolution mode (EVO=1).
+    int evo = 0;
+    std::string evo_opponent = "pst";
+    size_t pop = 16;
+    size_t generations = 50;
+    size_t gate_games = 8;
+    size_t h2h_games = 4;
+    long long movetime = 1000;
+    float sigma = 0.1f;
+    float sigma_abs = 0.0f;
+    float margin = 0.5f;
+    float hmargin = 0.0f;
+    float sigma_decay = 0.95f;
+    std::string openings_file;
+    size_t hash_mb = 16;
+    int quant = 0;
 };
 
 struct Dataset {
@@ -93,6 +118,33 @@ void print_usage() {
         << "                     run. Default: fresh -> linear head, CONTINUE -> the\n"
         << "                     checkpoint's own head. (linear: raw-centipawn output,\n"
         << "                     win-prob: final TANH over tanh(cp/400))\n"
+        << "\nEvolution mode (EVO=1): (1+lambda)-ES over a champion net. Each\n"
+        << "generation POP mutated children play a fixed suite of GAMES gate games\n"
+        << "against a fixed opponent (material+PST by default) -- every opening once\n"
+        << "as the candidate and once mirrored as Black, all games run in parallel\n"
+        << "across THREADS. The best child is promoted only if it beats the gate by\n"
+        << "MARGIN points over the champion AND wins/ties the H2H veto against the\n"
+        << "champion (no regression to the incumbent). Requires NET=champion.\n"
+        << "  EVO=1              enable evolution mode\n"
+        << "  POP=16             children per generation\n"
+        << "  GENERATIONS=50     generations to run\n"
+        << "  GAMES=8            gate-suite size per net (openings x both colors)\n"
+        << "  H2H=4              head-to-head veto games vs the champion\n"
+        << "  MOVETIME=1000      per-move search budget (ms)\n"
+        << "  OPPONENT=pst       gate opponent: pst, or a .backprop_net path\n"
+        << "  SIGMA=0.1          relative mutation std (fraction of each layer's std)\n"
+        << "  SIGMA_ABS=0        absolute noise added on top of the relative SIGMA\n"
+        << "  MARGIN=0.5         child must outscore the champion's gate score by this\n"
+        << "  HMARGIN=0          veto margin: child needs H2H/2 + HMARGIN points\n"
+        << "  SIGMA_DECAY=0.95   shrink SIGMA each generation nothing promotes\n"
+        << "  OPENINGS=file      one opening-position FEN per line (default: 4 built-ins)\n"
+        << "  HASH=16            per-worker transposition-table size (MB)\n"
+        << "  QUANT=0            1 = quantized int16 evaluator for the matches\n"
+        << "  OUT=path           output dir (default: evolved_networks/run_N)\n"
+        << "\nEvolution output: OUT/champ.net.backprop_net (current champion),\n"
+        << "OUT/gen_NNN/net.backprop_net (best child of each generation, promoted or\n"
+        << "not), and OUT/evolution.txt (columns: gen champ_gate best_child promoted\n"
+        << "sigma).\n"
         << "\nLabel convention and loss units: with a win-prob head (WINPROB=1) the\n"
         << "targets are bounded tanh(cp/S), S=400, in (-1,1); NetEvaluator inverts them\n"
         << "back to centipawns automatically, and Val MSE is in win-prob units\n"
@@ -763,6 +815,21 @@ Config parse_args(int argc, char** argv) {
         else if (key == "FENCSV")       config.fen_csv = std::stoi(val);
         else if (key == "WINPROB")      config.win_prob = std::clamp(std::stoi(val), 0, 1);
         else if (key == "SKIP_MATES")   config.skip_mates = std::stoi(val);
+        else if (key == "EVO")          config.evo = std::stoi(val);
+        else if (key == "OPPONENT")     config.evo_opponent = val;
+        else if (key == "POP")          config.pop = std::stoull(val);
+        else if (key == "GENERATIONS")  config.generations = std::stoull(val);
+        else if (key == "GAMES")        config.gate_games = std::stoull(val);
+        else if (key == "H2H")          config.h2h_games = std::stoull(val);
+        else if (key == "MOVETIME")     config.movetime = std::stoll(val);
+        else if (key == "SIGMA")        config.sigma = std::stof(val);
+        else if (key == "SIGMA_ABS")    config.sigma_abs = std::stof(val);
+        else if (key == "MARGIN")       config.margin = std::stof(val);
+        else if (key == "HMARGIN")      config.hmargin = std::stof(val);
+        else if (key == "SIGMA_DECAY")  config.sigma_decay = std::stof(val);
+        else if (key == "OPENINGS")     config.openings_file = val;
+        else if (key == "HASH")         config.hash_mb = std::stoull(val);
+        else if (key == "QUANT")        config.quant = std::stoi(val);
         else throw std::runtime_error("parse_args: unknown option '" + key + "'");
     }
     return config;
@@ -800,12 +867,434 @@ int run_probe(const Config& config) {
     return failures == 0 ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// Evolution mode (EVO=1): (1+lambda)-ES over the champion.
+//
+// Each generation POP children are created by adding Gaussian noise to the
+// champion (SIGMA scaled by each layer's own weight std, so one knob spans
+// every layer width). The champion AND all children then play the same fixed
+// suite of GAMES gate games against a fixed opponent (material+PST by default)
+// on a shared set of openings, each opening once as the candidate and once
+// mirrored so the candidate plays Black. The suite is embarrassingly parallel:
+// one worker thread per game, each with its own Searcher + transposition table
+// (the search itself stays single-threaded to avoid 11x11 oversubscription).
+//
+// The best-scoring child is promoted only if it clears BOTH bars:
+//   [1] PST gate:  best_child_gate >= champion_gate + MARGIN  -- still improving
+//       against the "true" teacher;
+//   [2] veto:      head-to-head vs the incumbent over H2H games, child must win
+//       at least H2H/2 + HMARGIN points (tie goes to the child, boxing out churn).
+// Generations with no promotion anneal SIGMA via SIGMA_DECAY.
+// ---------------------------------------------------------------------------
+
+std::vector<std::string> load_openings(const std::string& path) {
+    static const std::vector<std::string> kDefaultOpenings = {
+        // Four balanced mid-opening book positions, White to move and NOT in
+        // check (verified via ChessGame::status()==ONGOING). Each is a standard
+        // single-move-deviation book line.
+        // Ruy Lopez (closed), ~ply 9: 1.d4 d5 2.c3 e5 3.g1 f3
+        "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
+        // Italian (Giuoco Piano), ~ply 9: 1.d4 d5 2.e6 e6 3.g1 f3 4.e2 e4
+        "r1bqkbnr/ppp1pppp/1n6/3Pp3/2P1P3/3P4/PP2NPPP/RNBQKB1R w KQkq - 4 5",
+        // Queen's Gambit Declined, ~ply 7: 1.d4 d5 2.c4 c5 3.d3 d4
+        "rnbqkbnr/ppp1pppp/8/2pp4/2PPP3/8/PPPN1PPP/RNB1KBNR w KQkq - 2 4",
+        // Sicilian Defense, ~ply 9: 1.d4 d5 2.c4 c5 3.g1 f3 4.p2 p3
+        "rnbqkbnr/ppp1pp1p/6p1/3p4/3P2P1/5N2/PPPPP1PP/RNBQKB1R w KQkq - 3 4",
+    };
+    if (path.empty()) return kDefaultOpenings;
+
+    std::ifstream in(path);
+    if (!in.is_open())
+        throw std::runtime_error("load_openings: cannot open OPENINGS='" + path + "'");
+    std::vector<std::string> out;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        out.push_back(line);
+    }
+    if (out.empty())
+        throw std::runtime_error("load_openings: '" + path + "' contains no FEN lines");
+    return out;
+}
+
+// Net holds vector<unique_ptr<AbstractLayer>> (no copy ctor), so clone a fresh
+// Net and copy each layer's trained weights/biases/activation explicitly.
+BackpropNet::Net clone_net(const BackpropNet::Net& src) {
+    using BackpropNet::DenseLayer;
+    using BackpropNet::ActivationLayer;
+    BackpropNet::Net out;
+    for (const auto& layer : src.layers) {
+        if (layer->get_type() == "DEN") {
+            const auto* d = static_cast<const DenseLayer*>(layer.get());
+            auto copy = std::make_unique<DenseLayer>(d->get_weights().cols(),
+                                                     d->get_weights().rows(),
+                                                     DenseLayer::InitType::XAVIER);
+            copy->get_weights().data = d->get_weights().data;
+            copy->get_biases() = d->get_biases();
+            out.add_layer(std::move(copy));
+        } else if (layer->get_type() == "ACT") {
+            const auto* a = static_cast<const ActivationLayer*>(layer.get());
+            out.add_layer(std::make_unique<ActivationLayer>(a->get_activation()));
+        }
+    }
+    return out;
+}
+
+// Relative perturbation: noise std = SIGMA * (that set's own std) + SIGMA_ABS,
+// applied independently to every DenseLayer's weights and biases.
+void mutate_net(BackpropNet::Net& net, std::mt19937& rng, const float sigma,
+                const float sigma_abs) {
+    std::normal_distribution<float> gauss(0.0f, 1.0f);
+    for (auto& layer : net.layers) {
+        if (layer->get_type() != "DEN") continue;
+        auto* d = static_cast<BackpropNet::DenseLayer*>(layer.get());
+        auto& w = d->get_weights();
+        auto& b = d->get_biases();
+
+        float wstd = 0.0f;
+        for (const float v : w.data) wstd += v * v;
+        wstd = std::sqrt(wstd / std::max<size_t>(1, w.data.size()));
+        const float amp_w = sigma * wstd + sigma_abs;
+        for (float& v : w.data) v += gauss(rng) * amp_w;
+
+        float bstd = 0.0f;
+        for (const float v : b) bstd += v * v;
+        bstd = std::sqrt(bstd / std::max<size_t>(1, b.size()));
+        const float amp_b = sigma * bstd + sigma_abs;
+        for (float& v : b) v += gauss(rng) * amp_b;
+    }
+}
+
+struct GameOutcome {
+    float score = 0.5f;   // candidate's POV: 1 win / 0.5 draw / 0 loss
+    std::string reason;   // checkmate / stalemate / fifty-move / threefold /
+                          // insufficient material / max plies
+    size_t plies = 0;
+};
+
+// One match from position `game`; candidate = net_eval, opponent = opp_eval.
+GameOutcome play_game(const std::shared_ptr<chess::Evaluator>& net_eval,
+                      const std::shared_ptr<chess::Evaluator>& opp_eval,
+                      chess::ChessGame& game, const bool net_is_white,
+                      const long long movetime, chess::TranspositionTable& table) {
+    chess::Searcher net_search(*net_eval, &table);
+    chess::Searcher opp_search(*opp_eval, &table);
+    chess::SearchLimits lim;
+    lim.movetime = movetime;
+
+    for (size_t ply = 0; ply < 400; ++ply) {
+        const chess::GameStatus st = game.status();
+        if (st.result != chess::ONGOING) {
+            GameOutcome out;
+            out.plies = ply;
+            out.reason = st.reason.empty() ? "game end" : st.reason;
+            if (st.result == chess::WHITE_WIN) out.score = net_is_white ? 1.0f : 0.0f;
+            else if (st.result == chess::BLACK_WIN) out.score = net_is_white ? 0.0f : 1.0f;
+            else out.score = 0.5f;
+            return out;
+        }
+        const bool white_move = game.pos.side > 0;
+        chess::Searcher& mover = (white_move == net_is_white) ? net_search : opp_search;
+        const chess::SearchResult res = mover.think(game, lim);
+        if (!res.hasMove) { GameOutcome out; out.plies = ply; out.reason = "no legal move"; return out; }
+        game.make(res.best);
+    }
+    GameOutcome out;
+    out.plies = 400;
+    out.reason = "max plies";
+    return out;   // max plies -> draw
+}
+
+struct GameTask {
+    size_t slot = 0;            // candidate index into slots (0 = champion)
+    bool vs_champion = false;   // opponent = slots[0]; else the fixed opponent
+    size_t opening = 0;
+    bool net_is_white = true;
+};
+
+struct SuiteResult {
+    std::vector<float> scores;                 // candidate's POV per task (index-aligned)
+    size_t wins = 0, draws = 0, losses = 0;
+    std::map<std::string, size_t> reasons;
+    size_t total_plies = 0;
+};
+
+// Run every game in `tasks` across `nthreads` worker threads. Each worker owns
+// a private transposition table and a private (stateless) PST teacher; net
+// evaluators are built per task so each thread gets its own accumulator state.
+SuiteResult run_suite(const std::string& label,
+                      const std::vector<GameTask>& tasks,
+                      const std::vector<std::shared_ptr<BackpropNet::Net>>& slots,
+                      const std::shared_ptr<BackpropNet::Net>& opp_net,
+                      const std::vector<std::string>& openings,
+                      const Config& config, const unsigned nthreads) {
+    SuiteResult out;
+    out.scores.assign(tasks.size(), 0.5f);
+    if (tasks.empty()) return out;
+
+    const bool quant = config.quant != 0;
+    std::atomic<size_t> next{0}, done{0};
+    std::mutex cout_mutex;   // guards W/D/L counters and the shared progress line
+    const unsigned nw = std::min(nthreads, static_cast<unsigned>(tasks.size()));
+
+    const auto tally = [&](const GameOutcome& o) {
+        const size_t i = done.fetch_add(1) + 1;   // games completed so far
+        {
+            std::lock_guard<std::mutex> lk(cout_mutex);
+            if (o.score > 0.7f) ++out.wins;
+            else if (o.score < 0.3f) ++out.losses;
+            else ++out.draws;
+            if (o.plies < 400) ++out.reasons[o.reason];
+            out.total_plies += o.plies;
+            if (i % 10 == 0 || i == tasks.size()) {
+                std::cout << '\r' << label << ": game " << i << '/'
+                          << tasks.size() << " (W " << out.wins << " D " << out.draws
+                          << " L " << out.losses << ")     ";
+                std::cout.flush();
+            }
+        }
+    };
+
+    std::vector<std::thread> pool;
+    pool.reserve(nw);
+    for (unsigned t = 0; t < nw; ++t) {
+        pool.emplace_back([&] {
+            chess::TranspositionTable table;
+            table.setSize(config.hash_mb);
+            std::shared_ptr<chess::Evaluator> pst_teacher;   // lazy, stateless, per worker
+            for (;;) {
+                const size_t i = next.fetch_add(1);
+                if (i >= tasks.size()) break;
+                const GameTask& tk = tasks[i];
+                const auto net_eval =
+                    chess::makeNnueEvaluator(slots[tk.slot], "evolution", quant);
+                std::shared_ptr<chess::Evaluator> opp_eval;
+                if (tk.vs_champion) {
+                    opp_eval = chess::makeNnueEvaluator(slots[0], "evolution", quant);
+                } else if (opp_net) {
+                    opp_eval = chess::makeNnueEvaluator(opp_net, "opponent", quant);
+                } else {
+                    if (!pst_teacher) pst_teacher = chess::makePstEvaluator();
+                    opp_eval = pst_teacher;
+                }
+                chess::ChessGame game(openings[tk.opening]);
+                if (!tk.net_is_white) game.pos = mirror_position(game.pos);
+                const GameOutcome o = play_game(net_eval, opp_eval, game, tk.net_is_white,
+                                                config.movetime, table);
+                out.scores[i] = o.score;
+                tally(o);
+            }
+        });
+    }
+    for (auto& th : pool) th.join();
+
+    std::cout << '\r' << label << " done: " << tasks.size() << " games (W " << out.wins
+              << " D " << out.draws << " L " << out.losses << "), reasons:";
+    for (const auto& [reason, n] : out.reasons) std::cout << ' ' << reason << '=' << n;
+    std::cout << ", avg " << (tasks.empty() ? 0.0 : static_cast<double>(out.total_plies) / tasks.size())
+              << " plies/game\n";
+    return out;
+}
+
+std::string zpad3(const size_t n) {
+    std::ostringstream o;
+    o << (n < 10 ? "00" : n < 100 ? "0" : "") << n;
+    return o.str();
+}
+
+std::string next_evolved_run_dir() {
+    int best = 0;
+    if (std::filesystem::exists("evolved_networks")) {
+        for (const auto& entry : std::filesystem::directory_iterator("evolved_networks")) {
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("run_", 0) != 0) continue;
+            try {
+                best = std::max(best, std::stoi(name.substr(4)));
+            } catch (...) { /* not a run_N dir, skip */ }
+        }
+    }
+    return "evolved_networks/run_" + std::to_string(best + 1);
+}
+
+int run_evolution(const Config& config) {
+    using BackpropNet::Net;
+
+    if (config.net_path.empty())
+        throw std::runtime_error("EVO=1 requires NET=path/to/champion/net.backprop_net");
+    if (config.pop == 0)
+        throw std::runtime_error("EVO: POP must be >= 1");
+    if (config.gate_games == 0)
+        throw std::runtime_error("EVO: GAMES must be >= 1");
+    if (config.h2h_games == 0)
+        throw std::runtime_error("EVO: H2H must be >= 1");
+    if (config.movetime < 1)
+        throw std::runtime_error("EVO: MOVETIME must be >= 1");
+
+    std::string opp_lower = config.evo_opponent;
+    for (char& c : opp_lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const bool opp_is_pst = (opp_lower == "pst" || opp_lower.empty());
+
+    const std::vector<std::string> openings = load_openings(config.openings_file);
+    if (openings.empty()) throw std::runtime_error("EVO: no openings available");
+    for (const std::string& fen : openings) {   // validate early, fail fast
+        chess::ChessGame g(fen);
+        if (g.status().result != chess::ONGOING)
+            throw std::runtime_error("EVO: opening FEN is not an ongoing game: " + fen);
+    }
+
+    const std::string run_dir = config.out_dir.empty() ? next_evolved_run_dir() : config.out_dir;
+    std::filesystem::create_directories(run_dir);
+
+    auto champion = std::make_shared<Net>(BackpropNetReader::load(config.net_path));
+    BackpropNetReader::save(run_dir + "/champ.net", *champion);   // seed the run dir
+    const std::shared_ptr<Net> opp_net =
+        opp_is_pst ? nullptr
+                   : std::make_shared<Net>(BackpropNetReader::load(config.evo_opponent));
+
+    const unsigned nthreads = resolve_threads(config);
+    const float veto_need = static_cast<float>(config.h2h_games) / 2.0f + config.hmargin;
+
+    std::ofstream log(run_dir + "/evolution.txt");
+    if (!log.is_open())
+        throw std::runtime_error("EVO: cannot write " + run_dir + "/evolution.txt");
+    log << "gen champ_gate best_child promoted sigma\n";
+
+    float sigma = config.sigma;
+    std::mt19937 rng(config.seed ^ 0x0BADF00Du);
+    std::vector<std::shared_ptr<Net>> slots;
+    size_t games_played = 0, games_total = config.generations * (config.pop + 1) * config.gate_games
+                                          + config.generations * config.h2h_games;
+    auto t_start = std::chrono::steady_clock::now();
+
+    std::cout << "Champion  : " << config.net_path << "\n"
+              << "Opponent  : " << (opp_is_pst ? "material+pst" : config.evo_opponent) << "\n"
+              << "Openings  : " << openings.size() << " (each played both colors)\n"
+              << "Output    : " << run_dir << "\n"
+              << "Threads   : " << nthreads << " (games in parallel, single search each)\n"
+              << "Gate      : " << config.gate_games << " games/net/gen, MARGIN=" << config.margin << "\n"
+              << "Veto      : " << config.h2h_games << " h2h games, needs " << veto_need << " pts\n"
+              << "MOVETIME  : " << config.movetime << " ms\n\n";
+
+    for (size_t gen = 1; gen <= config.generations; ++gen) {
+        // slots[0] = champion, slots[1..POP] = this generation's children.
+        slots.clear();
+        slots.push_back(champion);
+        slots.reserve(config.pop + 1);
+        for (size_t i = 0; i < config.pop; ++i) {
+            auto child = std::make_shared<Net>(clone_net(*champion));
+            mutate_net(*child, rng, sigma, config.sigma_abs);
+            slots.push_back(std::move(child));
+        }
+
+        // Gate suite: champion + every child against the fixed opponent, on the
+        // same deterministic openings/colors so scores are comparable.
+        std::vector<GameTask> gate_tasks;
+        gate_tasks.reserve((config.pop + 1) * config.gate_games);
+        for (size_t slot = 0; slot <= config.pop; ++slot) {
+            for (size_t g = 0; g < config.gate_games; ++g) {
+                GameTask tk;
+                tk.slot = slot;
+                tk.opening = (g / 2) % openings.size();
+                tk.net_is_white = ((g % 2) == 0);
+                gate_tasks.push_back(tk);
+            }
+        }
+        const SuiteResult gate =
+            run_suite("gate", gate_tasks, slots, opp_net, openings, config, nthreads);
+        games_played += gate.scores.size();
+
+        const auto sum_games = [&](const size_t slot) {
+            float s = 0.0f;
+            for (size_t g = 0; g < config.gate_games; ++g)
+                s += gate.scores[slot * config.gate_games + g];
+            return s;
+        };
+        const float champ_gate = sum_games(0);
+
+        size_t best_child = 1;
+        float best_score = -1.0f;
+        for (size_t c = 1; c <= config.pop; ++c) {
+            const float s = sum_games(c);
+            if (s > best_score) { best_score = s; best_child = c; }
+        }
+
+        // Promotion: PST gate + champion veto (head-to-head vs the incumbent).
+        bool promoted = false;
+        float child_veto = 0.0f;
+        if (best_score >= champ_gate + config.margin) {
+            std::vector<GameTask> veto_tasks;
+            veto_tasks.reserve(config.h2h_games);
+            for (size_t h = 0; h < config.h2h_games; ++h) {
+                GameTask tk;
+                tk.slot = best_child;
+                tk.vs_champion = true;
+                tk.opening = (h / 2) % openings.size();
+                tk.net_is_white = ((h % 2) == 0);
+                veto_tasks.push_back(tk);
+            }
+            const SuiteResult veto =
+                run_suite("veto", veto_tasks, slots, opp_net, openings, config, nthreads);
+            games_played += veto.scores.size();
+            for (const float s : veto.scores) child_veto += s;
+            if (child_veto >= veto_need) promoted = true;
+        }
+
+        const auto t_gen = std::chrono::steady_clock::now();
+        const double gen_s = std::chrono::duration<double>(t_gen - t_start).count();
+        const std::string elapsed = [&] {
+            std::ostringstream o;
+            o << std::fixed << std::setprecision(1) << (gen_s / 60.0) << "m";
+            return o.str();
+        }();
+        const std::string eta = [&] {
+            if (gen < 2 || t_start == t_gen) return std::string("-");
+            const double per_gen = gen_s / static_cast<double>(gen);
+            double rem = per_gen * static_cast<double>(config.generations - gen);
+            std::ostringstream o;
+            o << std::fixed << std::setprecision(1) << (rem / 60.0) << "m";
+            return o.str();
+        }();
+
+        const std::shared_ptr<Net> best_of_gen = slots[best_child];
+        if (promoted) {
+            std::swap(slots[0], slots[best_child]);
+            champion = slots[0];
+            BackpropNetReader::save(run_dir + "/champ.net", *champion);
+        } else {
+            sigma *= config.sigma_decay;
+        }
+
+        const std::string gen_dir = run_dir + "/gen_" + zpad3(gen);
+        std::filesystem::create_directories(gen_dir);
+        BackpropNetReader::save(gen_dir + "/net", *best_of_gen);
+
+        log << gen << ' ' << champ_gate << ' ' << best_score << ' '
+            << (promoted ? 1 : 0) << ' ' << sigma << '\n';
+        log.flush();
+
+        std::cout << "Gen " << gen << '/' << config.generations
+                  << " | champ_gate=" << champ_gate
+                  << " best_child=" << best_score
+                  << "/" << config.gate_games
+                  << " promoted=" << (promoted ? "yes" : "no")
+                  << " sigma=" << sigma
+                  << " | games " << games_played << '/' << games_total
+                  << " elapsed " << elapsed << " | ETA " << eta << (eta == "-" ? "\n" : "\n\n");
+    }
+
+    std::cout << "\nDone. Champion saved: " << run_dir << "/champ.net.backprop_net\n"
+              << "Best child per gen: " << run_dir << "/gen_NNN/net.backprop_net\n";
+    return 0;
+}
+
 }   // namespace
 
 int main(int argc, char* argv[]) {
     try {
         const Config config = parse_args(argc, argv);
         if (config.probe) return run_probe(config);
+        if (config.evo) return run_evolution(config);
 
         const unsigned nthreads = resolve_threads(config);
 

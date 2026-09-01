@@ -36,12 +36,15 @@
         ./chess_trainer --probe NET=trained_networks/run_1/net.backprop_net
 
     Tunables: SAMPLES EPOCHS BATCH LR PATIENCE CLAMP PST_SCALE SEED MIRROR CAPTURE_BIAS
-              MAX_PLIES DATASET SKIP_MATES OUT
+              MAX_PLIES DATASET SKIP_MATES OUT WINPROB
     Full list: ./chess_trainer --help   (see howto/createAI.md for the workflow)
 
-    (Targets are win-probability values tanh(cp/400): the net ends in a TANH
-     output head and NetEvaluator inverts it back to centipawns. Val MSE is in
-     win-prob units. See howto/createAI.md "Label normalization".)
+    WINPROB=0|1 picks the output head. With a win-prob head (WINPROB=1) the
+    net ends in a TANH over tanh(cp/400), labels are bounded, and Val MSE is
+    in win-prob units (~0.01-0.05 for a good fit). With a linear head
+    (WINPROB=0, the fresh default) labels are raw centipawns and MSE is in
+    cp^2: sqrt(MSE) = RMS centipawns (e.g. 40000 -> ~200 cp RMS). See
+    howto/createAI.md "Label normalization".
 
     (-DNDEBUG matters: it disables the Matrix bounds asserts in the hot training loops.)
 

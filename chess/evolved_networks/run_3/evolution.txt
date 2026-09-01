@@ -1,0 +1,2 @@
+gen champ_gate best_child promoted sigma
+1 6 7 1 0.05
